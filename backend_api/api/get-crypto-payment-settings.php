@@ -1,0 +1,62 @@
+<?php
+require_once '../config/cors.php';
+require_once '../config/database.php';
+require_once __DIR__ . '/libs/ApiAuth.php';
+require_once __DIR__ . '/libs/PolygonUsdcPayments.php';
+require_once __DIR__ . '/libs/SolanaPayments.php';
+
+$database = new Database();
+$db = $database->getConnection();
+authenticateApiUser($db);
+$settings = polygonUsdcSettings();
+$solanaSettings = solanaPaymentSettings();
+$paymentMethods = [];
+if ($settings['enabled']) {
+    $paymentMethods[] = [
+        'id' => 'polygon_usdc',
+        'label' => $settings['network'] === 'Polygon PoS Amoy (testnet)'
+            ? 'USDC - Polygon Amoy (testnet)'
+            : 'USDC - Polygon PoS',
+        'network' => $settings['network'],
+        'asset' => 'USDC',
+    ];
+}
+if ($solanaSettings['enabled']) {
+    $paymentMethods[] = [
+        'id' => 'solana_sol',
+        'label' => $solanaSettings['network'] === 'Solana Devnet (testnet)'
+            ? 'SOL - Solana Devnet (testnet)'
+            : 'SOL - Solana',
+        'network' => $solanaSettings['network'],
+        'asset' => 'SOL',
+    ];
+    if ($solanaSettings['usdc_mint'] !== null) {
+        $paymentMethods[] = [
+            'id' => 'solana_usdc',
+            'label' => 'USDC - ' . $solanaSettings['network'],
+            'network' => $solanaSettings['network'],
+            'asset' => 'USDC',
+        ];
+    }
+    if ($solanaSettings['usdt_mint'] !== null) {
+        $paymentMethods[] = [
+            'id' => 'solana_usdt',
+            'label' => 'USDT - ' . $solanaSettings['network'],
+            'network' => $solanaSettings['network'],
+            'asset' => 'USDT',
+        ];
+    }
+}
+
+echo json_encode([
+    'success' => true,
+    'data' => [
+        'checkout_enabled' => $settings['enabled'],
+        'network' => $settings['network'],
+        'chain_id' => $settings['chain_id'],
+        'token_contract' => $settings['token_contract'],
+        'recipient_address' => $settings['recipient_address'],
+        'min_confirmations' => $settings['min_confirmations'],
+        'payment_methods' => $paymentMethods,
+    ],
+]);

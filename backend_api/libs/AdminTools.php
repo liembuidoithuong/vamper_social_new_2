@@ -10,6 +10,18 @@ function adminTableExists(PDO $db, string $table): bool
     return (bool)$stmt->fetchColumn();
 }
 
+function adminSettingValue(PDO $db, string $key, ?string $default = null): ?string
+{
+    if (!adminTableExists($db, 'settings')) {
+        return $default;
+    }
+
+    $stmt = $db->prepare('SELECT `value` FROM settings WHERE `key` = :key LIMIT 1');
+    $stmt->execute([':key' => $key]);
+    $value = $stmt->fetchColumn();
+    return $value === false ? $default : (string)$value;
+}
+
 function adminColumnExists(PDO $db, string $table, string $column): bool
 {
     $stmt = $db->prepare(
@@ -58,6 +70,32 @@ function ensureAdminToolsSchema(PDO $db): void
     ] as $name => $definition) {
         if (!adminColumnExists($db, 'reports', $name)) {
             $db->exec("ALTER TABLE reports ADD COLUMN `$name` $definition");
+        }
+    }
+}
+
+function ensurePartyManagementSchema(PDO $db): void
+{
+    if (!adminTableExists($db, 'parties')) {
+        $db->exec("CREATE TABLE parties (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            host_id INT NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            theme VARCHAR(100) DEFAULT 'General',
+            participants_count INT DEFAULT 1,
+            is_live TINYINT(1) DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_private TINYINT(1) NOT NULL DEFAULT 0,
+            password VARCHAR(255) NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    }
+
+    foreach ([
+        'is_private' => 'TINYINT(1) NOT NULL DEFAULT 0',
+        'password' => 'VARCHAR(255) NULL',
+    ] as $column => $definition) {
+        if (!adminColumnExists($db, 'parties', $column)) {
+            $db->exec("ALTER TABLE parties ADD COLUMN `$column` $definition");
         }
     }
 }
@@ -156,8 +194,8 @@ function recordVpcLedger(
 function adminRolePermissions(string $role): array
 {
     return match ($role) {
-        'super_admin' => ['dashboard', 'users', 'reports', 'finance', 'shop', 'admins', 'audit'],
-        'moderator' => ['dashboard', 'users', 'reports'],
+        'super_admin' => ['dashboard', 'users', 'reports', 'finance', 'shop', 'admins', 'audit', 'parties', 'party_monitoring'],
+        'moderator' => ['dashboard', 'users', 'reports', 'parties'],
         'finance' => ['dashboard', 'finance'],
         'support' => ['dashboard', 'users'],
         default => [],

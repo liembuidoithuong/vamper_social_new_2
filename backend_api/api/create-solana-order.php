@@ -12,20 +12,19 @@ $packages = polygonUsdcCoinPackages();
 $coins = is_array($data) ? filter_var($data['coins'] ?? null, FILTER_VALIDATE_INT) : false;
 $asset = is_array($data) ? strtoupper(trim((string)($data['asset'] ?? ''))) : '';
 
-if ($coins === false || !isset($packages[$coins]) || !in_array($asset, ['SOL', 'USDC', 'USDT'], true)) {
+if ($coins === false || !isset($packages[$coins]) || $asset !== 'SOL') {
     http_response_code(400);
-    echo json_encode(['success' => false, 'message' => 'Select a valid coin package and Solana asset.']);
+    echo json_encode(['success' => false, 'message' => 'Select a valid coin package for SOL top-up.']);
     exit;
 }
 
 try {
-    $settings = solanaPaymentSettings();
+    $settings = solanaPaymentSettings($db);
     if (!$settings['enabled']) {
         http_response_code(503);
         echo json_encode(['success' => false, 'message' => 'Solana top-ups are not configured yet.']);
         exit;
     }
-
     $tokenMint = match ($asset) {
         'USDC' => $settings['usdc_mint'],
         'USDT' => $settings['usdt_mint'],

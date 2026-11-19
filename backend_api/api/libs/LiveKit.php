@@ -24,6 +24,19 @@ function liveKitSettings(): ?array
     ];
 }
 
+function ensurePartyAdminMonitorTable(PDO $db): void
+{
+    $db->exec("CREATE TABLE IF NOT EXISTS party_admin_monitors (
+        monitor_id CHAR(32) NOT NULL PRIMARY KEY,
+        party_id INT NOT NULL,
+        admin_id INT NOT NULL,
+        admin_name VARCHAR(100) NOT NULL,
+        last_seen DATETIME NOT NULL,
+        ended_at DATETIME NULL,
+        KEY idx_party_admin_monitors_active (party_id, ended_at, last_seen)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
 function liveKitToken(
     array $settings,
     string $identity,
@@ -34,7 +47,8 @@ function liveKitToken(
     int $ttlSeconds = 3600,
     bool $canShareScreen = false,
     bool $micLocked = false,
-    bool $canPublishCamera = false
+    bool $canPublishCamera = false,
+    bool $canPublishData = true
 ): string
 {
     $now = time();
@@ -66,7 +80,7 @@ function liveKitToken(
                 'canPublish' => $canPublish,
                 'canPublishSources' => $publishSources,
                 'canSubscribe' => true,
-                'canPublishData' => true,
+                'canPublishData' => $canPublishData,
             ],
     ];
 

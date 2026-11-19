@@ -18,7 +18,7 @@ if ($coins === false || !isset($packages[$coins])) {
 }
 
 try {
-    $settings = polygonUsdcSettings();
+    $settings = polygonUsdcSettings($db);
     if (!$settings['enabled']) {
         http_response_code(503);
         echo json_encode([

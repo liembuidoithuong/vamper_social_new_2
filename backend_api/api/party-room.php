@@ -14,6 +14,7 @@ function partyRoomRespond(int $status, array $body): void
 
 function ensurePartyRoomTables(PDO $db): void
 {
+    ensurePartyAdminMonitorTable($db);
     $db->exec("CREATE TABLE IF NOT EXISTS party_members (
         party_id INT NOT NULL,
         user_id INT NOT NULL,
@@ -268,6 +269,14 @@ try {
             );
             $eventsQuery->execute([':party_id' => $partyId, ':after_id' => $eventId]);
 
+            $adminMonitorsQuery = $db->prepare(
+                'SELECT admin_name FROM party_admin_monitors
+                 WHERE party_id = :party_id AND ended_at IS NULL
+                   AND last_seen >= UTC_TIMESTAMP() - INTERVAL 30 SECOND
+                 ORDER BY last_seen DESC'
+            );
+            $adminMonitorsQuery->execute([':party_id' => $partyId]);
+
             $count = $db->prepare(
                 'UPDATE parties SET participants_count = (
                     SELECT COUNT(*) FROM party_members
@@ -280,6 +289,7 @@ try {
                 'success' => true,
                 'data' => [
                     'participants' => $participants,
+                    'admin_monitors' => $adminMonitorsQuery->fetchAll(PDO::FETCH_COLUMN),
                     'messages' => $messagesQuery->fetchAll(PDO::FETCH_ASSOC),
                     'events' => $eventsQuery->fetchAll(PDO::FETCH_ASSOC),
                     'self' => [

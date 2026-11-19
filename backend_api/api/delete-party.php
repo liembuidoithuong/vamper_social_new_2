@@ -42,7 +42,7 @@ try {
     }
 
     $db->beginTransaction();
-    foreach (['party_members', 'party_messages', 'party_events'] as $table) {
+    foreach (['party_members', 'party_messages', 'party_events', 'party_admin_monitors'] as $table) {
         $tableExists = $db->query('SHOW TABLES LIKE ' . $db->quote($table))->fetchColumn();
         if ($tableExists !== false) {
             $deleteRelated = $db->prepare("DELETE FROM `$table` WHERE party_id = :party_id");

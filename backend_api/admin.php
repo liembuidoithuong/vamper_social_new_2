@@ -1,5 +1,8 @@
 <?php
 require_once __DIR__ . '/libs/AdminTools.php';
+require_once __DIR__ . '/api/libs/PolygonUsdcPayments.php';
+require_once __DIR__ . '/api/libs/SolanaPayments.php';
+require_once __DIR__ . '/api/libs/LiveKit.php';
 
 function adminQueryString(string $key, string $default = ''): string
 {
@@ -56,6 +59,32 @@ function adminDeleteUploads(array $paths): void
     }
 }
 
+function adminIsHttpsUrl(string $url): bool
+{
+    $parts = parse_url($url);
+    return filter_var($url, FILTER_VALIDATE_URL) !== false
+        && is_array($parts)
+        && strtolower((string)($parts['scheme'] ?? '')) === 'https'
+        && isset($parts['host'])
+        && !isset($parts['user'])
+        && !isset($parts['pass']);
+}
+
+function adminClosePartyMedia(int $partyId): bool
+{
+    $settings = liveKitSettings();
+    if ($settings === null) {
+        return false;
+    }
+
+    $roomName = 'vamper-party-' . $partyId;
+    $rooms = liveKitAdminRequest($settings, 'ListRooms', ['names' => [$roomName]]);
+    if (!empty($rooms['rooms'])) {
+        liveKitAdminRequest($settings, 'DeleteRoom', ['room' => $roomName]);
+    }
+    return true;
+}
+
 ini_set('session.use_strict_mode', '1');
 session_name('vamper_admin');
 session_set_cookie_params([
@@ -100,7 +129,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$tab = adminQueryString('tab', 'users');
+$tab = $_SERVER['REQUEST_METHOD'] === 'POST' && is_string($_POST['tab'] ?? null)
+    ? $_POST['tab']
+    : adminQueryString('tab', 'users');
 $search = trim(adminQueryString('search'));
 $page = min(100000, max(1, intval(adminQueryString('page', '1'))));
 $limit = 10;
@@ -122,6 +153,9 @@ $txSearch = trim(adminQueryString('tx_search'));
 $txStatus = adminQueryString('tx_status');
 $txDateFrom = adminQueryString('tx_from');
 $txDateTo = adminQueryString('tx_to');
+$partySearch = trim(adminQueryString('party_search'));
+$partyPage = min(100000, max(1, intval(adminQueryString('party_page', '1'))));
+$partyLimit = 20;
 
 $error = '';
 $success = '';
@@ -191,12 +225,21 @@ if ($isAdminLoggedIn) {
     }
 }
 
+if ($isAdminLoggedIn) {
+    ensurePartyManagementSchema($db);
+    $db->exec("CREATE TABLE IF NOT EXISTS settings (
+        `key` VARCHAR(255) PRIMARY KEY,
+        `value` TEXT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
 // Handle CRUD & Dashboard Actions
 if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $postAction = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
     $requiredPermission = match ($postAction) {
         'set_user_status', 'create_user', 'edit_user', 'delete_user' => 'users',
-        'adjust_coins', 'save_settings' => 'finance',
+        'adjust_coins', 'save_polygon_payment_settings', 'save_solana_payment_settings' => 'finance',
+        'create_party', 'save_party', 'set_party_status', 'delete_party' => 'parties',
         'set_post_status', 'delete_post', 'review_report', 'delete_report' => 'reports',
         'create_shop_item', 'save_shop_item', 'toggle_shop_item', 'delete_shop_item' => 'shop',
         'delete_transaction' => 'finance',
@@ -219,6 +262,161 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif (!adminHasPermission($_SESSION['admin_role'], $requiredPermission)) {
         http_response_code(403);
         $error = 'Tài khoản của bạn không được cấp quyền cho thao tác này.';
+    } elseif ($postAction === 'create_party') {
+        $title = trim($_POST['title'] ?? '');
+        $theme = trim($_POST['theme'] ?? '');
+        $isPrivate = filter_var($_POST['is_private'] ?? null, FILTER_VALIDATE_INT);
+        $password = trim($_POST['password'] ?? '');
+        if (
+            $title === '' || mb_strlen($title) > 255 || $theme === '' || mb_strlen($theme) > 100
+            || !in_array($isPrivate, [0, 1], true)
+            || ($isPrivate === 1 && ($password === '' || strlen($password) > 72))
+        ) {
+            $error = 'Vui lòng kiểm tra tên, chủ đề, chế độ riêng tư và mật khẩu phòng.';
+        } else {
+            try {
+                $db->beginTransaction();
+                $insertParty = $db->prepare(
+                    'INSERT INTO parties (host_id, title, theme, is_private, password, participants_count, is_live, created_at)
+                     VALUES (:host_id, :title, :theme, :is_private, :password, 1, 1, NOW())'
+                );
+                $insertParty->execute([
+                    ':host_id' => (int)$_SESSION['admin_id'],
+                    ':title' => $title,
+                    ':theme' => $theme,
+                    ':is_private' => $isPrivate,
+                    ':password' => $isPrivate === 1 ? password_hash($password, PASSWORD_DEFAULT) : null,
+                ]);
+                $partyId = (int)$db->lastInsertId();
+                writeAdminAudit($db, (int)$_SESSION['admin_id'], 'party_created', 'party', $partyId, [
+                    'title' => $title,
+                    'host_id' => (int)$_SESSION['admin_id'],
+                ]);
+                $db->commit();
+                $success = 'Đã tạo phòng Party mới.';
+            } catch (Throwable $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                error_log('Admin party creation failed: ' . $exception->getMessage());
+                $error = 'Không thể tạo phòng Party.';
+            }
+        }
+    } elseif (in_array($postAction, ['save_party', 'set_party_status'], true)) {
+        $partyId = filter_var($_POST['party_id'] ?? null, FILTER_VALIDATE_INT);
+        $partyQuery = $db->prepare('SELECT * FROM parties WHERE id = :id LIMIT 1');
+        if (!$partyId || $partyId < 1) {
+            $error = 'Phòng Party không hợp lệ.';
+        } else {
+            $partyQuery->execute([':id' => $partyId]);
+            $party = $partyQuery->fetch(PDO::FETCH_ASSOC);
+            if (!$party) {
+                $error = 'Không tìm thấy phòng Party.';
+            } else {
+                $title = $postAction === 'set_party_status' ? (string)$party['title'] : trim($_POST['title'] ?? '');
+                $theme = $postAction === 'set_party_status' ? (string)$party['theme'] : trim($_POST['theme'] ?? '');
+                $isPrivate = $postAction === 'set_party_status'
+                    ? (int)$party['is_private']
+                    : filter_var($_POST['is_private'] ?? null, FILTER_VALIDATE_INT);
+                $password = trim($_POST['password'] ?? '');
+                $isLive = filter_var($_POST['is_live'] ?? null, FILTER_VALIDATE_INT);
+
+                if (
+                    $title === '' || mb_strlen($title) > 255 || $theme === '' || mb_strlen($theme) > 100
+                    || !in_array($isPrivate, [0, 1], true) || !in_array($isLive, [0, 1], true)
+                    || ($isPrivate === 1 && $password !== '' && strlen($password) > 72)
+                    || ($isPrivate === 1 && $password === '' && empty($party['password']))
+                ) {
+                    $error = 'Vui lòng kiểm tra lại thông tin phòng và mật khẩu nếu bật chế độ riêng tư.';
+                } else {
+                    try {
+                        $mediaServerAvailable = true;
+                        if ((int)$party['is_live'] === 1 && $isLive === 0) {
+                            $mediaServerAvailable = adminClosePartyMedia((int)$partyId);
+                        }
+                        $db->beginTransaction();
+                        $savedPassword = $isPrivate === 0
+                            ? null
+                            : ($password !== '' ? password_hash($password, PASSWORD_DEFAULT) : $party['password']);
+                        $updateParty = $db->prepare(
+                            'UPDATE parties
+                             SET title = :title, theme = :theme, is_private = :is_private,
+                                 password = :password, is_live = :is_live
+                             WHERE id = :id'
+                        );
+                        $updateParty->execute([
+                            ':title' => $title,
+                            ':theme' => $theme,
+                            ':is_private' => $isPrivate,
+                            ':password' => $savedPassword,
+                            ':is_live' => $isLive,
+                            ':id' => $partyId,
+                        ]);
+                        if ($isLive === 0 && adminTableExists($db, 'party_admin_monitors')) {
+                            $db->prepare(
+                                'UPDATE party_admin_monitors SET ended_at = UTC_TIMESTAMP()
+                                 WHERE party_id = :party_id AND ended_at IS NULL'
+                            )->execute([':party_id' => $partyId]);
+                        }
+                        writeAdminAudit(
+                            $db,
+                            (int)$_SESSION['admin_id'],
+                            'party_updated',
+                            'party',
+                            $partyId,
+                            ['is_live' => $isLive === 1, 'is_private' => $isPrivate === 1]
+                        );
+                        $db->commit();
+                        $success = $isLive === 1
+                            ? 'Đã lưu cấu hình phòng Party.'
+                            : ($mediaServerAvailable
+                                ? 'Đã đóng phòng Party.'
+                                : 'Đã đóng phòng trong ứng dụng; LiveKit chưa cấu hình nên không thể xác nhận trạng thái media.');
+                    } catch (Throwable $exception) {
+                        if ($db->inTransaction()) $db->rollBack();
+                        error_log('Admin party update failed: ' . $exception->getMessage());
+                        $error = $exception instanceof DomainException
+                            ? $exception->getMessage()
+                            : 'Không thể cập nhật phòng Party.';
+                    }
+                }
+            }
+        }
+    } elseif ($postAction === 'delete_party') {
+        $partyId = filter_var($_POST['party_id'] ?? null, FILTER_VALIDATE_INT);
+        if (!$partyId || $partyId < 1) {
+            $error = 'Phòng Party không hợp lệ.';
+        } else {
+            try {
+                $db->beginTransaction();
+                $partyQuery = $db->prepare('SELECT title, is_live FROM parties WHERE id = :id FOR UPDATE');
+                $partyQuery->execute([':id' => $partyId]);
+                $party = $partyQuery->fetch(PDO::FETCH_ASSOC);
+                if (!$party) {
+                    throw new DomainException('Không tìm thấy phòng Party.');
+                }
+                $mediaServerAvailable = true;
+                if ((int)$party['is_live'] === 1) {
+                    $mediaServerAvailable = adminClosePartyMedia((int)$partyId);
+                }
+                foreach (['party_members', 'party_messages', 'party_events', 'party_admin_monitors'] as $table) {
+                    adminDeleteRowsIfTableExists($db, $table, 'party_id = :party_id', [':party_id' => $partyId]);
+                }
+                $db->prepare('DELETE FROM parties WHERE id = :id')->execute([':id' => $partyId]);
+                writeAdminAudit($db, (int)$_SESSION['admin_id'], 'party_deleted', 'party', $partyId, [
+                    'title' => $party['title'],
+                ]);
+                $db->commit();
+                $success = $mediaServerAvailable
+                    ? 'Đã xóa phòng Party và dữ liệu liên quan.'
+                    : 'Đã xóa dữ liệu phòng; LiveKit chưa cấu hình nên không thể xác nhận trạng thái media.';
+            } catch (DomainException $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                $error = $exception->getMessage();
+            } catch (Throwable $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                error_log('Admin party deletion failed: ' . $exception->getMessage());
+                $error = 'Không thể xóa phòng Party.';
+            }
+        }
     } elseif ($postAction === 'set_user_status') {
         $userId = filter_var($_POST['user_id'] ?? null, FILTER_VALIDATE_INT);
         $newStatus = filter_var($_POST['is_active'] ?? null, FILTER_VALIDATE_INT);
@@ -296,7 +494,7 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                     $hostedParties->execute([':id' => $userId]);
                     $partyIds = $hostedParties->fetchAll(PDO::FETCH_COLUMN);
                     foreach ($partyIds as $partyId) {
-                        foreach (['party_members', 'party_messages', 'party_events'] as $table) {
+                        foreach (['party_members', 'party_messages', 'party_events', 'party_admin_monitors'] as $table) {
                             adminDeleteRowsIfTableExists($db, $table, 'party_id = :party_id', [':party_id' => $partyId]);
                         }
                     }
@@ -808,19 +1006,60 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $success = 'Đã cập nhật quyền quản trị.';
             }
         }
-    } elseif ($postAction === 'save_settings') {
-        $paypalEmail = trim($_POST['paypal_email'] ?? '');
-        $paypalMode = $_POST['paypal_mode'] ?? 'sandbox';
-        if (!filter_var($paypalEmail, FILTER_VALIDATE_EMAIL) || !in_array($paypalMode, ['sandbox', 'live'], true)) {
-            $error = 'Cài đặt ví không hợp lệ.';
+    } elseif (in_array($postAction, ['save_polygon_payment_settings', 'save_solana_payment_settings'], true)) {
+        $method = $postAction === 'save_polygon_payment_settings' ? 'polygon' : 'solana';
+        $network = trim($_POST['payment_network'] ?? '');
+        $rpcUrl = trim($_POST['rpc_url'] ?? '');
+        $recipient = trim($_POST['recipient_address'] ?? '');
+        $enabled = $_POST['enabled'] ?? '';
+        $validNetworks = $method === 'polygon' ? ['amoy', 'mainnet'] : ['devnet', 'mainnet-beta'];
+        $validRecipient = $method === 'polygon'
+            ? preg_match('/^0x[a-fA-F0-9]{40}$/D', $recipient) === 1
+                && strtolower($recipient) !== '0x' . str_repeat('0', 40)
+            : preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/D', $recipient) === 1;
+
+        if (
+            !in_array($network, $validNetworks, true)
+            || !adminIsHttpsUrl($rpcUrl)
+            || !$validRecipient
+            || !in_array($enabled, ['0', '1'], true)
+        ) {
+            $error = 'Cài đặt mạng, RPC hoặc địa chỉ nhận không hợp lệ. Hãy kiểm tra lại thông tin.';
         } else {
-        $db->beginTransaction();
-        $upsert = $db->prepare("INSERT INTO settings (`key`, `value`) VALUES (:k, :v) ON DUPLICATE KEY UPDATE `value` = :v");
-        $upsert->execute([':k' => 'paypal_email', ':v' => $paypalEmail]);
-        $upsert->execute([':k' => 'paypal_mode', ':v' => $paypalMode]);
-        writeAdminAudit($db, (int)$_SESSION['admin_id'], 'payment_settings_updated', 'settings', 'paypal', ['mode' => $paypalMode]);
-        $db->commit();
-        $success = "Đã lưu cài đặt ví PayPal thành công!";
+            $prefix = 'crypto_' . $method . '_' . $network;
+            try {
+                $db->beginTransaction();
+                $findSetting = $db->prepare('SELECT 1 FROM settings WHERE `key` = :key LIMIT 1');
+                $updateSetting = $db->prepare('UPDATE settings SET `value` = :value WHERE `key` = :key');
+                $insertSetting = $db->prepare('INSERT INTO settings (`key`, `value`) VALUES (:key, :value)');
+                foreach ([
+                    'crypto_' . $method . '_active_network' => $network,
+                    $prefix . '_enabled' => $enabled,
+                    $prefix . '_rpc_url' => $rpcUrl,
+                    $prefix . '_recipient_address' => $recipient,
+                ] as $settingKey => $value) {
+                    $findSetting->execute([':key' => $settingKey]);
+                    if ($findSetting->fetchColumn() !== false) {
+                        $updateSetting->execute([':key' => $settingKey, ':value' => $value]);
+                    } else {
+                        $insertSetting->execute([':key' => $settingKey, ':value' => $value]);
+                    }
+                }
+                writeAdminAudit(
+                    $db,
+                    (int)$_SESSION['admin_id'],
+                    'payment_settings_updated',
+                    'settings',
+                    $method . '_' . $network,
+                    ['network' => $network, 'enabled' => $enabled === '1']
+                );
+                $db->commit();
+                $success = 'Đã lưu cấu hình blockchain. App sẽ dùng địa chỉ và mạng này cho các đơn mới.';
+            } catch (Throwable $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                error_log('Admin blockchain payment settings update failed: ' . $exception->getMessage());
+                $error = 'Không thể lưu cấu hình blockchain. Chưa có thay đổi nào được lưu.';
+            }
         }
     }
 }
@@ -891,9 +1130,43 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $adminRole = $_SESSION['admin_role'];
+    $polygonActiveNetwork = adminSettingValue(
+        $db,
+        'crypto_polygon_active_network',
+        strtolower(trim((string)getenv('POLYGON_USDC_NETWORK'))) ?: 'amoy'
+    ) ?? 'amoy';
+    if (!in_array($polygonActiveNetwork, ['amoy', 'mainnet'], true)) {
+        $polygonActiveNetwork = 'amoy';
+    }
+    $polygonAdminNetwork = $_SERVER['REQUEST_METHOD'] === 'POST'
+        && ($_POST['action'] ?? '') === 'save_polygon_payment_settings'
+        ? (is_string($_POST['payment_network'] ?? null) ? $_POST['payment_network'] : $polygonActiveNetwork)
+        : adminQueryString('polygon_network', $polygonActiveNetwork);
+    if (!in_array($polygonAdminNetwork, ['amoy', 'mainnet'], true)) {
+        $polygonAdminNetwork = $polygonActiveNetwork;
+    }
+    $polygonAdminSettings = polygonUsdcSettings($db, $polygonAdminNetwork);
+
+    $solanaActiveNetwork = adminSettingValue(
+        $db,
+        'crypto_solana_active_network',
+        strtolower(trim((string)getenv('SOLANA_NETWORK'))) ?: 'devnet'
+    ) ?? 'devnet';
+    if (!in_array($solanaActiveNetwork, ['devnet', 'mainnet-beta'], true)) {
+        $solanaActiveNetwork = 'devnet';
+    }
+    $solanaAdminNetwork = $_SERVER['REQUEST_METHOD'] === 'POST'
+        && ($_POST['action'] ?? '') === 'save_solana_payment_settings'
+        ? (is_string($_POST['payment_network'] ?? null) ? $_POST['payment_network'] : $solanaActiveNetwork)
+        : adminQueryString('solana_network', $solanaActiveNetwork);
+    if (!in_array($solanaAdminNetwork, ['devnet', 'mainnet-beta'], true)) {
+        $solanaAdminNetwork = $solanaActiveNetwork;
+    }
+    $solanaAdminSettings = solanaPaymentSettings($db, $solanaAdminNetwork);
+
     $tabPermissions = [
         'dashboard' => 'dashboard', 'users' => 'users', 'posts' => 'reports',
-        'reports' => 'reports', 'wallet' => 'finance', 'ledger' => 'finance',
+        'reports' => 'reports', 'parties' => 'parties', 'wallet' => 'finance', 'ledger' => 'finance',
         'shop' => 'shop', 'admins' => 'admins', 'audit' => 'audit',
     ];
     if (!isset($tabPermissions[$tab]) || !adminHasPermission($adminRole, $tabPermissions[$tab])) {
@@ -931,15 +1204,6 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
         ':tx_from' => $dateFrom, ':tx_to' => $dateTo,
     ]);
     $periodStats = $periodStatsStmt->fetch(PDO::FETCH_ASSOC);
-
-    // Fetch settings
-    $settingsStmt = $db->query("SELECT * FROM settings");
-    $settingsMap = [];
-    while ($row = $settingsStmt->fetch(PDO::FETCH_ASSOC)) {
-        $settingsMap[$row['key']] = $row['value'];
-    }
-    $paypalEmail = $settingsMap['paypal_email'] ?? 'admin@vamper.com';
-    $paypalMode = $settingsMap['paypal_mode'] ?? 'sandbox';
 
     // Search, status filter, and pagination for user operations.
     $userConditions = [];
@@ -1043,6 +1307,41 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $txStmt->execute();
     $transactions = $txStmt->fetchAll(PDO::FETCH_ASSOC);
 
+    $partyConditions = [];
+    $partyParams = [];
+    if ($partySearch !== '') {
+        $partyConditions[] = '(p.title LIKE :party_title OR u.full_name LIKE :party_host)';
+        $partyParams[':party_title'] = '%' . $partySearch . '%';
+        $partyParams[':party_host'] = '%' . $partySearch . '%';
+    }
+    $partyWhere = $partyConditions ? ' WHERE ' . implode(' AND ', $partyConditions) : '';
+    $partyCount = $db->prepare(
+        'SELECT COUNT(*) FROM parties p LEFT JOIN users u ON u.id = p.host_id' . $partyWhere
+    );
+    $partyCount->execute($partyParams);
+    $totalPartyPages = max(1, (int)ceil((int)$partyCount->fetchColumn() / $partyLimit));
+    $partyPage = min($partyPage, $totalPartyPages);
+    $partyOffset = ($partyPage - 1) * $partyLimit;
+    $partyMemberCount = adminTableExists($db, 'party_members')
+        ? '(SELECT COUNT(*) FROM party_members pm
+            WHERE pm.party_id = p.id AND pm.last_seen >= UTC_TIMESTAMP() - INTERVAL 30 SECOND)'
+        : '0';
+    $partyStmt = $db->prepare(
+        "SELECT p.id, p.host_id, p.title, p.theme, p.is_private, p.is_live, p.created_at,
+                u.full_name AS host_name, $partyMemberCount AS active_participants
+         FROM parties p LEFT JOIN users u ON u.id = p.host_id
+         $partyWhere
+         ORDER BY p.is_live DESC, p.created_at DESC, p.id DESC
+         LIMIT :limit OFFSET :offset"
+    );
+    foreach ($partyParams as $key => $value) {
+        $partyStmt->bindValue($key, $value, PDO::PARAM_STR);
+    }
+    $partyStmt->bindValue(':limit', $partyLimit, PDO::PARAM_INT);
+    $partyStmt->bindValue(':offset', $partyOffset, PDO::PARAM_INT);
+    $partyStmt->execute();
+    $partyRows = $partyStmt->fetchAll(PDO::FETCH_ASSOC);
+
     $ledgerStmt = $db->query("SELECT l.*, u.full_name, u.email, a.full_name AS admin_name
         FROM vpc_ledger l LEFT JOIN users u ON u.id = l.user_id
         LEFT JOIN users a ON a.id = l.actor_id ORDER BY l.id DESC LIMIT 100");
@@ -1077,6 +1376,7 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $navItems = [
                     'dashboard' => ['dashboard', 'fa-chart-line', 'Tổng Quan'],
                     'users' => ['users', 'fa-users', 'Quản Lý Người Dùng'],
+                    'parties' => ['parties', 'fa-headphones', 'Quản Lý Phòng Party'],
                     'posts' => ['reports', 'fa-newspaper', 'Kiểm Duyệt Bài Đăng'],
                     'reports' => ['reports', 'fa-flag', 'Quản Lý Tố Cáo'],
                     'wallet' => ['finance', 'fa-wallet', 'Ví & Giao Dịch'],
@@ -1497,6 +1797,357 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                             </table>
                         </div>
                     </div>
+                <?php elseif ($tab === 'parties'): ?>
+                    <div class="space-y-5">
+                        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                                <h2 class="text-xl font-bold text-gray-800">Quản lý phòng Party</h2>
+                                <p class="mt-1 text-xs text-gray-500">Danh sách phòng đã tạo trên server, gồm cả phòng đang đóng.</p>
+                            </div>
+                            <button type="button" onclick="openCreatePartyModal()" class="rounded-lg bg-red-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-600">
+                                <i class="fa-solid fa-plus mr-1"></i> Tạo phòng
+                            </button>
+                        </div>
+
+                        <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                            Khi admin nghe trực tiếp, thành viên trong phòng sẽ thấy thông báo đang được giám sát âm thanh. Admin chỉ nghe, không thể bật mic và không có chức năng ghi âm.
+                        </div>
+
+                        <form method="GET" class="flex gap-2 rounded-xl bg-white p-4 shadow-sm">
+                            <input type="hidden" name="tab" value="parties">
+                            <input type="search" name="party_search" value="<?= htmlspecialchars($partySearch) ?>" placeholder="Tìm tên phòng hoặc chủ phòng" class="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm">
+                            <button type="submit" class="rounded-lg bg-gray-800 px-4 py-2 text-sm font-semibold text-white">Tìm</button>
+                        </form>
+
+                        <div class="overflow-x-auto rounded-xl bg-white shadow-sm">
+                            <table class="w-full min-w-[1000px] text-left text-sm">
+                                <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                                    <tr>
+                                        <th class="px-4 py-3">Phòng</th>
+                                        <th class="px-4 py-3">Chủ phòng</th>
+                                        <th class="px-4 py-3">Chủ đề</th>
+                                        <th class="px-4 py-3">Trạng thái</th>
+                                        <th class="px-4 py-3">Người tham gia</th>
+                                        <th class="px-4 py-3">Ngày tạo</th>
+                                        <th class="px-4 py-3 text-right">Thao tác</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-100">
+                                    <?php if (!$partyRows): ?>
+                                        <tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">Chưa có phòng Party phù hợp.</td></tr>
+                                    <?php else: foreach ($partyRows as $partyRow): ?>
+                                        <tr class="hover:bg-gray-50">
+                                            <td class="px-4 py-3">
+                                                <div class="font-semibold text-gray-800"><?= htmlspecialchars($partyRow['title']) ?></div>
+                                                <div class="text-xs text-gray-400">#<?= (int)$partyRow['id'] ?> · <?= (int)$partyRow['is_private'] === 1 ? 'Riêng tư' : 'Công khai' ?></div>
+                                            </td>
+                                            <td class="px-4 py-3 text-gray-700"><?= htmlspecialchars($partyRow['host_name'] ?? 'Tài khoản không còn tồn tại') ?></td>
+                                            <td class="px-4 py-3 text-gray-600"><?= htmlspecialchars($partyRow['theme'] ?? 'General') ?></td>
+                                            <td class="px-4 py-3">
+                                                <?php if ((int)$partyRow['is_live'] === 1): ?>
+                                                    <span class="rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">Đang mở</span>
+                                                <?php else: ?>
+                                                    <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-600">Đã đóng</span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td class="px-4 py-3 text-gray-600"><?= (int)$partyRow['active_participants'] ?></td>
+                                            <td class="px-4 py-3 text-xs text-gray-500"><?= htmlspecialchars((string)$partyRow['created_at']) ?></td>
+                                            <td class="px-4 py-3 text-right">
+                                                <div class="inline-flex flex-wrap justify-end gap-1">
+                                                    <?php if ((int)$partyRow['is_live'] === 1 && adminHasPermission($adminRole, 'party_monitoring')): ?>
+                                                        <button type="button" class="rounded bg-purple-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-700" onclick="startPartyMonitor(<?= (int)$partyRow['id'] ?>, <?= htmlspecialchars(json_encode($partyRow['title'], JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP)) ?>)">
+                                                            <i class="fa-solid fa-headphones mr-1"></i> Nghe
+                                                        </button>
+                                                    <?php endif; ?>
+                                                    <button type="button" class="rounded bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                                                        data-id="<?= (int)$partyRow['id'] ?>"
+                                                        data-title="<?= htmlspecialchars($partyRow['title'], ENT_QUOTES) ?>"
+                                                        data-theme="<?= htmlspecialchars($partyRow['theme'] ?? 'General', ENT_QUOTES) ?>"
+                                                        data-private="<?= (int)$partyRow['is_private'] ?>"
+                                                        data-live="<?= (int)$partyRow['is_live'] ?>"
+                                                        onclick="openEditPartyModal(this)">Sửa</button>
+                                                    <form method="POST" class="inline" onsubmit="return confirm('<?= (int)$partyRow['is_live'] === 1 ? 'Đóng' : 'Mở' ?> phòng Party này?');">
+                                                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                                        <input type="hidden" name="tab" value="parties">
+                                                        <input type="hidden" name="action" value="set_party_status">
+                                                        <input type="hidden" name="party_id" value="<?= (int)$partyRow['id'] ?>">
+                                                        <input type="hidden" name="is_live" value="<?= (int)$partyRow['is_live'] === 1 ? 0 : 1 ?>">
+                                                        <button type="submit" class="rounded bg-gray-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-gray-800"><?= (int)$partyRow['is_live'] === 1 ? 'Đóng' : 'Mở' ?></button>
+                                                    </form>
+                                                    <form method="POST" class="inline" onsubmit="return confirm('Xóa vĩnh viễn phòng Party và dữ liệu liên quan? Thao tác này không thể hoàn tác.');">
+                                                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                                        <input type="hidden" name="tab" value="parties">
+                                                        <input type="hidden" name="action" value="delete_party">
+                                                        <input type="hidden" name="party_id" value="<?= (int)$partyRow['id'] ?>">
+                                                        <button type="submit" class="rounded bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700">Xóa</button>
+                                                    </form>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <?php if ($totalPartyPages > 1): ?>
+                            <div class="flex items-center justify-between text-sm text-gray-600">
+                                <span>Trang <?= $partyPage ?> / <?= $totalPartyPages ?></span>
+                                <div class="flex gap-2">
+                                    <?php if ($partyPage > 1): ?>
+                                        <a class="rounded bg-white px-3 py-1.5 shadow-sm" href="admin.php?<?= htmlspecialchars(http_build_query(['tab' => 'parties', 'party_search' => $partySearch, 'party_page' => $partyPage - 1])) ?>">Trước</a>
+                                    <?php endif; ?>
+                                    <?php if ($partyPage < $totalPartyPages): ?>
+                                        <a class="rounded bg-white px-3 py-1.5 shadow-sm" href="admin.php?<?= htmlspecialchars(http_build_query(['tab' => 'parties', 'party_search' => $partySearch, 'party_page' => $partyPage + 1])) ?>">Sau</a>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
+                    <div id="createPartyModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black bg-opacity-50 p-4">
+                        <form method="POST" class="w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-lg font-bold text-gray-800">Tạo phòng Party</h3>
+                                <button type="button" onclick="closePartyModal('createPartyModal')" class="text-gray-500 hover:text-gray-800"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                            <p class="text-xs text-gray-500">Phòng được tạo dưới tài khoản quản trị đang đăng nhập.</p>
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                            <input type="hidden" name="tab" value="parties">
+                            <input type="hidden" name="action" value="create_party">
+                            <label class="block text-sm font-medium text-gray-700">Tên phòng
+                                <input name="title" maxlength="255" required class="mt-1 w-full rounded-lg border px-3 py-2">
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Chủ đề
+                                <input name="theme" maxlength="100" value="General" required class="mt-1 w-full rounded-lg border px-3 py-2">
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Quyền truy cập
+                                <select name="is_private" onchange="togglePartyPassword(this, 'createPartyPassword')" class="mt-1 w-full rounded-lg border px-3 py-2">
+                                    <option value="0">Công khai</option>
+                                    <option value="1">Riêng tư</option>
+                                </select>
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Mật khẩu phòng
+                                <input id="createPartyPassword" name="password" maxlength="72" disabled class="mt-1 w-full rounded-lg border px-3 py-2" placeholder="Bắt buộc với phòng riêng tư">
+                            </label>
+                            <div class="flex justify-end gap-2">
+                                <button type="button" onclick="closePartyModal('createPartyModal')" class="rounded-lg border px-4 py-2">Hủy</button>
+                                <button type="submit" class="rounded-lg bg-red-500 px-4 py-2 font-semibold text-white">Tạo phòng</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div id="editPartyModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black bg-opacity-50 p-4">
+                        <form method="POST" class="w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-lg font-bold text-gray-800">Chỉnh sửa phòng Party</h3>
+                                <button type="button" onclick="closePartyModal('editPartyModal')" class="text-gray-500 hover:text-gray-800"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                            <input type="hidden" name="tab" value="parties">
+                            <input type="hidden" name="action" value="save_party">
+                            <input type="hidden" name="party_id" id="edit_party_id">
+                            <label class="block text-sm font-medium text-gray-700">Tên phòng
+                                <input name="title" id="edit_party_title" maxlength="255" required class="mt-1 w-full rounded-lg border px-3 py-2">
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Chủ đề
+                                <input name="theme" id="edit_party_theme" maxlength="100" required class="mt-1 w-full rounded-lg border px-3 py-2">
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Quyền truy cập
+                                <select name="is_private" id="edit_party_private" onchange="togglePartyPassword(this, 'editPartyPassword')" class="mt-1 w-full rounded-lg border px-3 py-2">
+                                    <option value="0">Công khai</option>
+                                    <option value="1">Riêng tư</option>
+                                </select>
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Mật khẩu mới (để trống để giữ nguyên)
+                                <input id="editPartyPassword" name="password" maxlength="72" disabled class="mt-1 w-full rounded-lg border px-3 py-2">
+                            </label>
+                            <label class="block text-sm font-medium text-gray-700">Trạng thái
+                                <select name="is_live" id="edit_party_live" class="mt-1 w-full rounded-lg border px-3 py-2">
+                                    <option value="1">Đang mở</option>
+                                    <option value="0">Đã đóng</option>
+                                </select>
+                            </label>
+                            <div class="flex justify-end gap-2">
+                                <button type="button" onclick="closePartyModal('editPartyModal')" class="rounded-lg border px-4 py-2">Hủy</button>
+                                <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white">Lưu thay đổi</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <div id="partyMonitorModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black bg-opacity-60 p-4">
+                        <div class="w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-lg font-bold text-gray-800">Nghe phòng Party</h3>
+                                <button type="button" onclick="stopPartyMonitor()" class="text-gray-500 hover:text-gray-800"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                            <p id="partyMonitorStatus" class="text-sm text-gray-600">Đang kết nối...</p>
+                            <div id="partyMonitorAudio" class="space-y-2"></div>
+                            <button id="partyMonitorStop" type="button" onclick="stopPartyMonitor()" class="w-full rounded-lg bg-red-600 px-4 py-2 font-semibold text-white">Dừng nghe</button>
+                        </div>
+                    </div>
+                    <script>
+                        function openCreatePartyModal() {
+                            const form = document.querySelector('#createPartyModal form');
+                            form.reset();
+                            togglePartyPassword(form.querySelector('[name="is_private"]'), 'createPartyPassword');
+                            document.getElementById('createPartyModal').classList.remove('hidden');
+                            document.getElementById('createPartyModal').classList.add('flex');
+                        }
+                        function openEditPartyModal(button) {
+                            document.getElementById('edit_party_id').value = button.dataset.id;
+                            document.getElementById('edit_party_title').value = button.dataset.title;
+                            document.getElementById('edit_party_theme').value = button.dataset.theme;
+                            document.getElementById('edit_party_private').value = button.dataset.private;
+                            document.getElementById('edit_party_live').value = button.dataset.live;
+                            const password = document.getElementById('editPartyPassword');
+                            password.value = '';
+                            password.disabled = button.dataset.private !== '1';
+                            document.getElementById('editPartyModal').classList.remove('hidden');
+                            document.getElementById('editPartyModal').classList.add('flex');
+                        }
+                        function closePartyModal(id) {
+                            const modal = document.getElementById(id);
+                            modal.classList.add('hidden');
+                            modal.classList.remove('flex');
+                        }
+                        function togglePartyPassword(select, inputId) {
+                            const input = document.getElementById(inputId);
+                            input.disabled = select.value !== '1';
+                            if (input.disabled) input.value = '';
+                        }
+                    </script>
+                    <script type="module">
+                        const csrfToken = <?= json_encode($csrfToken) ?>;
+                        const endpoint = 'admin-party-monitor.php';
+                        const monitorModal = document.getElementById('partyMonitorModal');
+                        const monitorStatus = document.getElementById('partyMonitorStatus');
+                        const audioContainer = document.getElementById('partyMonitorAudio');
+                        let monitorRoom = null;
+                        let monitorId = null;
+                        let monitorPartyId = null;
+                        let heartbeatTimer = null;
+
+                        async function requestMonitor(action, keepalive = false) {
+                            const response = await fetch(endpoint, {
+                                method: 'POST',
+                                credentials: 'same-origin',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    csrf_token: csrfToken,
+                                    action,
+                                    party_id: monitorPartyId,
+                                    monitor_id: monitorId
+                                }),
+                                keepalive
+                            });
+                            const result = await response.json();
+                            if (!response.ok || result.success !== true) {
+                                throw new Error(result.message || 'Không thể cập nhật phiên nghe.');
+                            }
+                            return result.data || {};
+                        }
+
+                        window.startPartyMonitor = async (partyId, title) => {
+                            if (monitorRoom) await window.stopPartyMonitor();
+                            monitorPartyId = partyId;
+                            monitorModal.classList.remove('hidden');
+                            monitorModal.classList.add('flex');
+                            monitorStatus.textContent = `Đang kết nối tới "${title}"...`;
+                            audioContainer.replaceChildren();
+                            try {
+                                monitorStatus.textContent = 'Đang tải bộ kết nối âm thanh...';
+                                const { Room, RoomEvent, Track } = await import('https://cdn.jsdelivr.net/npm/livekit-client@2.24.1/dist/livekit-client.esm.mjs');
+                                monitorStatus.textContent = `Đang kết nối tới "${title}"...`;
+                                const result = await requestMonitor('start');
+                                monitorId = result.monitor_id;
+                                const room = new Room();
+                                monitorRoom = room;
+                                const subscribeToAudioOnly = (participant) => {
+                                    for (const publication of participant.trackPublications.values()) {
+                                        publication.setSubscribed(publication.kind === Track.Kind.Audio);
+                                    }
+                                };
+                                room.on(RoomEvent.ParticipantConnected, subscribeToAudioOnly);
+                                room.on(RoomEvent.TrackPublished, (publication) => {
+                                    publication.setSubscribed(publication.kind === Track.Kind.Audio);
+                                });
+                                room.on(RoomEvent.TrackSubscribed, (track) => {
+                                    if (track.kind !== Track.Kind.Audio) return;
+                                    const audio = track.attach();
+                                    audio.autoplay = true;
+                                    audio.controls = true;
+                                    audio.volume = 1;
+                                    audioContainer.appendChild(audio);
+                                    monitorStatus.textContent = 'Đã nhận âm thanh từ phòng.';
+                                    audio.play().catch(() => {
+                                        monitorStatus.textContent = 'Đã kết nối. Bấm nút phát trên trình phát âm thanh để nghe.';
+                                    });
+                                });
+                                room.on(RoomEvent.Disconnected, () => {
+                                    monitorStatus.textContent = 'Mất kết nối tới phòng âm thanh.';
+                                    if (monitorRoom === room) {
+                                        monitorRoom = null;
+                                        window.stopPartyMonitor();
+                                    }
+                                });
+                                await new Promise((resolve) => window.setTimeout(resolve, 2200));
+                                await room.connect(result.livekit_url, result.livekit_token, { autoSubscribe: false });
+                                for (const participant of room.remoteParticipants.values()) {
+                                    subscribeToAudioOnly(participant);
+                                }
+                                monitorStatus.textContent = `Đã kết nối tới "${title}". Thành viên đã được thông báo; không ghi âm.`;
+                                heartbeatTimer = window.setInterval(() => {
+                                    requestMonitor('heartbeat').catch((error) => {
+                                        monitorStatus.textContent = error.message || 'Phiên admin đã hết hạn.';
+                                        window.stopPartyMonitor();
+                                    });
+                                }, 10000);
+                            } catch (error) {
+                                monitorStatus.textContent = error.message || 'Không thể kết nối âm thanh.';
+                                if (monitorId) {
+                                    try { await requestMonitor('stop'); } catch (stopError) { console.error(stopError); }
+                                }
+                                if (monitorRoom) await monitorRoom.disconnect();
+                                monitorRoom = null;
+                                monitorId = null;
+                                monitorPartyId = null;
+                            }
+                        };
+
+                        window.stopPartyMonitor = async () => {
+                            if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer);
+                            heartbeatTimer = null;
+                            const activeRoom = monitorRoom;
+                            monitorRoom = null;
+                            if (activeRoom) {
+                                await activeRoom.disconnect();
+                            }
+                            if (monitorId && monitorPartyId) {
+                                try { await requestMonitor('stop'); } catch (error) { console.error(error); }
+                            }
+                            monitorId = null;
+                            monitorPartyId = null;
+                            audioContainer.replaceChildren();
+                            monitorModal.classList.add('hidden');
+                            monitorModal.classList.remove('flex');
+                        };
+
+                        window.addEventListener('pagehide', () => {
+                            if (!monitorId || !monitorPartyId) return;
+                            fetch(endpoint, {
+                                method: 'POST',
+                                credentials: 'same-origin',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    csrf_token: csrfToken,
+                                    action: 'stop',
+                                    party_id: monitorPartyId,
+                                    monitor_id: monitorId
+                                }),
+                                keepalive: true
+                            });
+                        });
+                    </script>
                 <?php elseif ($tab === 'wallet'): ?>
                     <!-- WALLET & TRANSACTIONS TAB -->
                     <div class="space-y-8">
@@ -1525,31 +2176,92 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                         </div>
 
-                        <!-- Admin Wallet Settings Form -->
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
-                            <h3 class="text-base md:text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                                <i class="fa-solid fa-gear text-red-500"></i> Cài Đặt Ví Thanh Toán Admin (PayPal)
-                            </h3>
-                            <form method="POST" class="space-y-4 max-w-xl">
-                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
-                                <input type="hidden" name="action" value="save_settings">
-                                <div>
-                                    <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Email Ví PayPal Business / Merchant</label>
-                                    <input type="email" name="paypal_email" value="<?= htmlspecialchars($paypalEmail) ?>" required class="w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Môi Trường Thanh Toán</label>
-                                    <select name="paypal_mode" class="w-full px-4 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500">
-                                        <option value="sandbox" <?= $paypalMode === 'sandbox' ? 'selected' : '' ?>>Sandbox (Thử nghiệm)</option>
-                                        <option value="live" <?= $paypalMode === 'live' ? 'selected' : '' ?>>Live (thanh toán thật)</option>
+                        <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                            <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+                                <h3 class="text-base md:text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                    <i class="fa-solid fa-coins text-purple-600"></i> USDC - Polygon
+                                </h3>
+                                <p class="text-xs text-gray-500 mb-4">Địa chỉ nhận được lưu riêng theo từng mạng. Chỉ dùng RPC URL công khai; không nhập URL có API key hoặc thông tin bí mật.</p>
+                                <form method="GET" class="mb-4">
+                                    <input type="hidden" name="tab" value="wallet">
+                                    <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Mạng đang cấu hình</label>
+                                    <select name="polygon_network" onchange="this.form.submit()" class="w-full px-4 py-2 border rounded-lg text-sm">
+                                        <option value="amoy" <?= $polygonAdminNetwork === 'amoy' ? 'selected' : '' ?>>Polygon Amoy (testnet)</option>
+                                        <option value="mainnet" <?= $polygonAdminNetwork === 'mainnet' ? 'selected' : '' ?>>Polygon PoS (mainnet)</option>
                                     </select>
-                                    <p class="mt-2 text-xs text-amber-700">Checkout chỉ hoạt động khi máy chủ đã cấu hình PayPal API credentials tương ứng, email Merchant khớp với tài khoản PayPal và URL trả về HTTPS. Sandbox dùng tài khoản thử nghiệm; Live thu tiền thật. Sau khi đổi chế độ, người dùng cần tạo đơn hàng mới.</p>
-                                </div>
-                                <button type="submit" class="px-6 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold hover:bg-red-600 transition shadow-md">
-                                    Lưu Cài Đặt Ví
-                                </button>
-                            </form>
+                                </form>
+                                <?php if ($polygonAdminNetwork === 'mainnet'): ?>
+                                    <div class="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-xs font-semibold">MAINNET: Giao dịch dùng tiền thật và thường không thể đảo ngược. Kiểm tra kỹ mạng, token, địa chỉ nhận và RPC trước khi bật.</div>
+                                <?php else: ?>
+                                    <div class="mb-4 p-3 bg-blue-50 text-blue-800 rounded-lg text-xs">Amoy chỉ dùng token thử nghiệm; không có giá trị tiền thật.</div>
+                                <?php endif; ?>
+                                <form method="POST" class="space-y-4" <?= $polygonAdminNetwork === 'mainnet' ? 'onsubmit="return confirm(\'Bạn đang cấu hình Polygon mainnet. Việc bật sẽ nhận tiền thật và giao dịch không thể hoàn tác. Tiếp tục?\')"' : '' ?>>
+                                    <input type="hidden" name="tab" value="wallet">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                    <input type="hidden" name="action" value="save_polygon_payment_settings">
+                                    <input type="hidden" name="payment_network" value="<?= htmlspecialchars($polygonAdminNetwork) ?>">
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">RPC URL (HTTPS)</label>
+                                        <input type="url" name="rpc_url" value="<?= htmlspecialchars((string)($polygonAdminSettings['rpc_url'] ?? '')) ?>" required class="w-full px-4 py-2 border rounded-lg text-sm" placeholder="https://...">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Địa chỉ ví nhận USDC</label>
+                                        <input type="text" name="recipient_address" value="<?= htmlspecialchars((string)($polygonAdminSettings['recipient_address'] ?? '')) ?>" required pattern="0x[a-fA-F0-9]{40}" class="w-full px-4 py-2 border rounded-lg text-sm" placeholder="0x...">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Trạng thái</label>
+                                        <select name="enabled" class="w-full px-4 py-2 border rounded-lg text-sm">
+                                            <option value="0" <?= $polygonAdminSettings['enabled'] ? '' : 'selected' ?>>Tắt nhận nạp</option>
+                                            <option value="1" <?= $polygonAdminSettings['enabled'] ? 'selected' : '' ?>>Bật nhận nạp</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="px-6 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-semibold hover:bg-purple-700">Lưu cấu hình Polygon</button>
+                                </form>
+                            </section>
+
+                            <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+                                <h3 class="text-base md:text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                    <i class="fa-solid fa-wallet text-green-600"></i> SOL - Solana
+                                </h3>
+                                <p class="text-xs text-gray-500 mb-4">Chỉ SOL được cung cấp cho đơn nạp mới. Địa chỉ nhận được lưu riêng cho Devnet và Mainnet.</p>
+                                <form method="GET" class="mb-4">
+                                    <input type="hidden" name="tab" value="wallet">
+                                    <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Mạng đang cấu hình</label>
+                                    <select name="solana_network" onchange="this.form.submit()" class="w-full px-4 py-2 border rounded-lg text-sm">
+                                        <option value="devnet" <?= $solanaAdminNetwork === 'devnet' ? 'selected' : '' ?>>Solana Devnet (testnet)</option>
+                                        <option value="mainnet-beta" <?= $solanaAdminNetwork === 'mainnet-beta' ? 'selected' : '' ?>>Solana Mainnet</option>
+                                    </select>
+                                </form>
+                                <?php if ($solanaAdminNetwork === 'mainnet-beta'): ?>
+                                    <div class="mb-4 p-3 bg-red-50 text-red-800 rounded-lg text-xs font-semibold">MAINNET: Giao dịch dùng tiền thật và thường không thể đảo ngược. Kiểm tra kỹ mạng, ví nhận và RPC trước khi bật.</div>
+                                <?php else: ?>
+                                    <div class="mb-4 p-3 bg-blue-50 text-blue-800 rounded-lg text-xs">Devnet chỉ dùng SOL thử nghiệm; không có giá trị tiền thật.</div>
+                                <?php endif; ?>
+                                <form method="POST" class="space-y-4" <?= $solanaAdminNetwork === 'mainnet-beta' ? 'onsubmit="return confirm(\'Bạn đang cấu hình Solana mainnet. Việc bật sẽ nhận tiền thật và giao dịch không thể hoàn tác. Tiếp tục?\')"' : '' ?>>
+                                    <input type="hidden" name="tab" value="wallet">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                    <input type="hidden" name="action" value="save_solana_payment_settings">
+                                    <input type="hidden" name="payment_network" value="<?= htmlspecialchars($solanaAdminNetwork) ?>">
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">RPC URL (HTTPS)</label>
+                                        <input type="url" name="rpc_url" value="<?= htmlspecialchars((string)($solanaAdminSettings['rpc_url'] ?? '')) ?>" required class="w-full px-4 py-2 border rounded-lg text-sm" placeholder="https://...">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Địa chỉ ví nhận SOL</label>
+                                        <input type="text" name="recipient_address" value="<?= htmlspecialchars((string)($solanaAdminSettings['recipient_address'] ?? '')) ?>" required pattern="[1-9A-HJ-NP-Za-km-z]{32,44}" class="w-full px-4 py-2 border rounded-lg text-sm" placeholder="Base58...">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-700 uppercase mb-1">Trạng thái</label>
+                                        <select name="enabled" class="w-full px-4 py-2 border rounded-lg text-sm">
+                                            <option value="0" <?= $solanaAdminSettings['enabled'] ? '' : 'selected' ?>>Tắt nhận nạp</option>
+                                            <option value="1" <?= $solanaAdminSettings['enabled'] ? 'selected' : '' ?>>Bật nhận nạp</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="px-6 py-2.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700">Lưu cấu hình Solana</button>
+                                </form>
+                            </section>
                         </div>
+                        <p class="text-xs text-gray-500">PayPal checkout vẫn tắt. Các cấu hình RPC và địa chỉ ví chỉ áp dụng cho đơn hàng mới; đơn đang chờ vẫn được xác minh theo mạng và địa chỉ đã lưu khi tạo đơn.</p>
 
                         <!-- Transaction Logs Table -->
                         <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">

@@ -58,8 +58,8 @@ try {
         echo json_encode(['success' => false, 'message' => 'This Solana checkout is not available.']);
         exit;
     }
-    $settings = solanaPaymentSettings();
-    if (!$settings['enabled'] || $checkout['network'] !== $settings['network_key']) {
+    $settings = solanaPaymentSettings($db, (string)$checkout['network']);
+    if (!$settings['configured']) {
         throw new RuntimeException('Solana payment verification is not configured for this order network.');
     }
 
@@ -75,8 +75,7 @@ try {
         default => null,
     };
     if (
-        !hash_equals($settings['recipient_address'], (string)$checkout['recipient_address'])
-        || ($asset === 'SOL' && $checkout['token_mint'] !== null)
+        ($asset === 'SOL' && $checkout['token_mint'] !== null)
         || ($asset !== 'SOL' && ($expectedMint === null || $checkout['token_mint'] !== $expectedMint))
     ) {
         throw new DomainException('The stored Solana recipient or token does not match the configured payment method.');

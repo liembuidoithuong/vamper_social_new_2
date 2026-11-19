@@ -12,9 +12,15 @@ function polygonUsdcCoinPackages(): array
     return [100 => '4.99', 500 => '19.99', 1200 => '39.99', 3000 => '89.99'];
 }
 
-function polygonUsdcSettings(): array
+function polygonUsdcSettings(?PDO $db = null, ?string $networkOverride = null): array
 {
-    $networkKey = strtolower(trim((string)getenv('POLYGON_USDC_NETWORK')));
+    $envNetworkKey = strtolower(trim((string)getenv('POLYGON_USDC_NETWORK')));
+    $networkKey = $networkOverride ?? (
+        $db === null
+            ? $envNetworkKey
+            : (string)(adminSettingValue($db, 'crypto_polygon_active_network', $envNetworkKey) ?? '')
+    );
+    $networkKey = strtolower(trim($networkKey));
     $networks = [
         'mainnet' => [
             'chain_id' => POLYGON_USDC_CHAIN_ID,
@@ -28,36 +34,60 @@ function polygonUsdcSettings(): array
         ],
     ];
     $network = $networks[$networkKey] ?? null;
+    $profilePrefix = 'crypto_polygon_' . $networkKey;
+    $useLegacyEnvironment = $networkKey === $envNetworkKey;
+    $enabledValue = $db === null
+        ? getenv('POLYGON_USDC_ENABLED')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_enabled',
+            $useLegacyEnvironment ? (string)getenv('POLYGON_USDC_ENABLED') : '0'
+        );
     $enabledFlag = in_array(
-        strtolower(trim((string)getenv('POLYGON_USDC_ENABLED'))),
+        strtolower(trim((string)$enabledValue)),
         ['1', 'true'],
         true
     );
-    $rpcUrl = trim((string)getenv('POLYGON_RPC_URL'));
-    $recipient = trim((string)getenv('POLYGON_USDC_RECEIVER_ADDRESS'));
+    $rpcUrl = trim((string)($db === null
+        ? getenv('POLYGON_RPC_URL')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_rpc_url',
+            $useLegacyEnvironment ? (string)getenv('POLYGON_RPC_URL') : ''
+        )));
+    $recipient = trim((string)($db === null
+        ? getenv('POLYGON_USDC_RECEIVER_ADDRESS')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_recipient_address',
+            $useLegacyEnvironment ? (string)getenv('POLYGON_USDC_RECEIVER_ADDRESS') : ''
+        )));
     $confirmations = filter_var(
         getenv('POLYGON_USDC_MIN_CONFIRMATIONS') ?: '64',
         FILTER_VALIDATE_INT,
         ['options' => ['min_range' => 64, 'max_range' => 10000]]
     );
 
-    $configured = $enabledFlag
-        && is_array($network)
+    $rpcConfigured = filter_var($rpcUrl, FILTER_VALIDATE_URL) !== false
+        && strtolower((string)parse_url($rpcUrl, PHP_URL_SCHEME)) === 'https';
+    $recipientConfigured = preg_match('/^0x[a-fA-F0-9]{40}$/D', $recipient) === 1
+        && strtolower($recipient) !== '0x' . str_repeat('0', 40);
+    $configured = is_array($network)
         && function_exists('curl_init')
-        && filter_var($rpcUrl, FILTER_VALIDATE_URL) !== false
-        && strtolower((string)parse_url($rpcUrl, PHP_URL_SCHEME)) === 'https'
-        && preg_match('/^0x[a-fA-F0-9]{40}$/D', $recipient) === 1
-        && strtolower($recipient) !== '0x' . str_repeat('0', 40)
+        && $rpcConfigured
+        && $recipientConfigured
         && $confirmations !== false;
 
     return [
-        'enabled' => $configured,
-        'rpc_url' => $configured ? $rpcUrl : null,
-        'recipient_address' => $configured ? strtolower($recipient) : null,
+        'enabled' => $enabledFlag && $configured,
+        'configured' => $configured,
+        'network_key' => $networkKey,
+        'rpc_url' => $rpcConfigured ? $rpcUrl : null,
+        'recipient_address' => $recipientConfigured ? strtolower($recipient) : null,
         'chain_id' => $network['chain_id'] ?? null,
         'network' => $network['network'] ?? 'Polygon PoS',
         'token_contract' => $network['token_contract'] ?? null,
-        'min_confirmations' => $configured ? $confirmations : null,
+        'min_confirmations' => $confirmations !== false ? $confirmations : null,
     ];
 }
 

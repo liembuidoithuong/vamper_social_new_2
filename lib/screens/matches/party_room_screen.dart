@@ -30,6 +30,7 @@ class _PartyRoomScreenState extends State<PartyRoomScreen> {
   final TextEditingController _msgController = TextEditingController();
   final List<Map<String, dynamic>> _messages = [];
   final List<Map<String, dynamic>> _participants = [];
+  List<String> _activeAdminMonitors = [];
 
   // 10 Seats State (Seat 0 = Host, Seats 1-9 = Participants)
   late List<Map<String, dynamic>?> _seats;
@@ -297,6 +298,10 @@ class _PartyRoomScreenState extends State<PartyRoomScreen> {
       final participants = (data['participants'] as List? ?? const [])
           .map((item) => Map<String, dynamic>.from(item as Map))
           .toList();
+      final adminMonitors = (data['admin_monitors'] as List? ?? const [])
+          .map((name) => name.toString())
+          .where((name) => name.isNotEmpty)
+          .toList();
       final updatedSeats = List<Map<String, dynamic>?>.filled(10, null);
       for (final participant in participants) {
         final seatIndex = int.tryParse(
@@ -368,6 +373,7 @@ class _PartyRoomScreenState extends State<PartyRoomScreen> {
         _participants
           ..clear()
           ..addAll(participants);
+        _activeAdminMonitors = adminMonitors;
         _seats = updatedSeats;
         _isCohost = isCohost;
         _isHandRaised = isRaised;
@@ -1725,6 +1731,33 @@ class _PartyRoomScreenState extends State<PartyRoomScreen> {
                   _roomStatus!,
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ),
+            if (_activeAdminMonitors.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 8,
+                  horizontal: 16,
+                ),
+                color: Colors.amber.shade900,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.hearing, color: Colors.white, size: 18),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        'Quản trị viên ${_activeAdminMonitors.join(', ')} đang nghe trực tiếp âm thanh phòng. Không ghi âm.',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             if (_isScreenSharing || _sharedScreenTrack != null)

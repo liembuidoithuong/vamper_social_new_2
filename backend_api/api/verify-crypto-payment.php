@@ -61,8 +61,13 @@ try {
         echo json_encode(['success' => false, 'message' => 'This USDC checkout is not available.']);
         exit;
     }
-    $settings = polygonUsdcSettings();
-    if (!$settings['enabled']) {
+    $networkKey = match ((int)$checkout['chain_id']) {
+        POLYGON_USDC_CHAIN_ID => 'mainnet',
+        POLYGON_AMOY_CHAIN_ID => 'amoy',
+        default => '',
+    };
+    $settings = polygonUsdcSettings($db, $networkKey);
+    if (!$settings['configured']) {
         throw new RuntimeException('Polygon USDC verification is not configured.');
     }
 
@@ -73,7 +78,8 @@ try {
         : 0;
     $orderAmount = (int)polygonUsdcAmountToBaseUnits((string)$checkout['amount_usdc']);
     if (
-        (int)$checkout['chain_id'] !== $settings['chain_id']
+        $networkKey === ''
+        || (int)$checkout['chain_id'] !== $settings['chain_id']
         || strcasecmp($checkout['token_contract'], (string)$settings['token_contract']) !== 0
         || !isset($packages[$coins])
         || $orderAmount <= $baseAmount

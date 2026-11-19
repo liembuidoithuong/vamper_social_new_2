@@ -8,9 +8,15 @@ const SOLANA_MAINNET_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SOLANA_DEVNET_USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const SOLANA_MAINNET_USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
 
-function solanaPaymentSettings(): array
+function solanaPaymentSettings(?PDO $db = null, ?string $networkOverride = null): array
 {
-    $networkKey = strtolower(trim((string)getenv('SOLANA_NETWORK')));
+    $envNetworkKey = strtolower(trim((string)getenv('SOLANA_NETWORK')));
+    $networkKey = $networkOverride ?? (
+        $db === null
+            ? $envNetworkKey
+            : (string)(adminSettingValue($db, 'crypto_solana_active_network', $envNetworkKey) ?? '')
+    );
+    $networkKey = strtolower(trim($networkKey));
     $networks = [
         'mainnet-beta' => [
             'network' => 'Solana Mainnet',
@@ -26,29 +32,52 @@ function solanaPaymentSettings(): array
         ],
     ];
     $network = $networks[$networkKey] ?? null;
+    $profilePrefix = 'crypto_solana_' . $networkKey;
+    $useLegacyEnvironment = $networkKey === $envNetworkKey;
+    $enabledValue = $db === null
+        ? getenv('SOLANA_ENABLED')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_enabled',
+            $useLegacyEnvironment ? (string)getenv('SOLANA_ENABLED') : '0'
+        );
     $enabledFlag = in_array(
-        strtolower(trim((string)getenv('SOLANA_ENABLED'))),
+        strtolower(trim((string)$enabledValue)),
         ['1', 'true'],
         true
     );
-    $rpcUrl = trim((string)getenv('SOLANA_RPC_URL'));
-    $recipient = trim((string)getenv('SOLANA_RECEIVER_ADDRESS'));
-    $configured = $enabledFlag
-        && is_array($network)
+    $rpcUrl = trim((string)($db === null
+        ? getenv('SOLANA_RPC_URL')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_rpc_url',
+            $useLegacyEnvironment ? (string)getenv('SOLANA_RPC_URL') : ''
+        )));
+    $recipient = trim((string)($db === null
+        ? getenv('SOLANA_RECEIVER_ADDRESS')
+        : adminSettingValue(
+            $db,
+            $profilePrefix . '_recipient_address',
+            $useLegacyEnvironment ? (string)getenv('SOLANA_RECEIVER_ADDRESS') : ''
+        )));
+    $rpcConfigured = filter_var($rpcUrl, FILTER_VALIDATE_URL) !== false
+        && strtolower((string)parse_url($rpcUrl, PHP_URL_SCHEME)) === 'https';
+    $recipientConfigured = preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/D', $recipient) === 1;
+    $configured = is_array($network)
         && function_exists('curl_init')
-        && filter_var($rpcUrl, FILTER_VALIDATE_URL) !== false
-        && strtolower((string)parse_url($rpcUrl, PHP_URL_SCHEME)) === 'https'
-        && preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/D', $recipient) === 1;
+        && $rpcConfigured
+        && $recipientConfigured;
 
     $usdcMint = $network['usdc_mint'] ?? null;
     $usdtMint = $network['usdt_mint'] ?? null;
     return [
-        'enabled' => $configured,
+        'enabled' => $enabledFlag && $configured,
+        'configured' => $configured,
         'network_key' => $networkKey,
         'network' => $network['network'] ?? 'Solana',
         'genesis_hash' => $network['genesis_hash'] ?? null,
-        'rpc_url' => $configured ? $rpcUrl : null,
-        'recipient_address' => $configured ? $recipient : null,
+        'rpc_url' => $rpcConfigured ? $rpcUrl : null,
+        'recipient_address' => $recipientConfigured ? $recipient : null,
         'usdc_mint' => is_string($usdcMint)
             && preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/D', $usdcMint) === 1
                 ? $usdcMint

@@ -36,18 +36,43 @@ they retain access. The database account needs `CREATE` and `ALTER` privileges
 for this one-time initialization. No database reset or full SQL import is
 required. Existing sessions are invalidated by the admin-only session cookie.
 
+The **Quản Lý Phòng Party** tab lists live and closed rooms with search and
+pagination. Super admins and moderators can create rooms, edit room details,
+open or close rooms, and permanently delete a room and its associated chat and
+presence data. Admin-created rooms use the signed-in admin account as host.
+When LiveKit is configured, closing or deleting a live room also asks LiveKit
+to terminate its media room.
+
+Audio monitoring is listen-only, restricted to super admins, and available only
+for live rooms. It uses a short-lived LiveKit token without microphone or data
+publishing permission and does not record audio. While monitoring is active,
+Party clients display a visible banner naming the admin. The monitor session
+is also written to the admin audit log; its visible room status expires within
+30 seconds if the admin connection ends unexpectedly.
+The admin browser loads the pinned LiveKit JavaScript SDK (`2.24.1`) from
+jsDelivr for playback, so that host must be reachable from the admin browser.
+
 Admin sessions use password hashes only, CSRF tokens, role permissions, and
 audited write actions. User and post moderation is reversible; user deletion
 has been removed. VPC adjustments, shop purchases, gifts, and sandbox top-ups
 are recorded in the additive VPC ledger. Older coin activity is intentionally
 not backfilled because trustworthy before/after balances are unavailable.
 
-PayPal checkout is currently disabled in the API. Existing PayPal order
-verification remains available for checkouts created before it was disabled.
-Do not re-enable PayPal until the merchant account issue is resolved.
+The Wallet & Transactions admin tab manages Polygon USDC and Solana SOL
+payment profiles. It stores a separate enabled flag, HTTPS RPC URL, and
+receiving address for each supported testnet/mainnet profile in the existing
+`settings` table. Saving a profile selects that network for new checkouts;
+existing pending orders continue to verify against their recorded network and
+recipient. Database values take precedence over the legacy payment environment
+variables. RPC URLs are visible to finance admins, so do not put provider
+secrets in them or share screenshots containing credentials.
 
-Configure these values in the PHP-FPM/Apache environment on the API server.
-Never put PayPal client secrets in Flutter, SQL, or source control:
+PayPal checkout is disabled in the API and its admin configuration has been
+removed. Existing PayPal order verification remains available for checkouts
+created before it was disabled.
+
+Legacy PayPal credentials, if present, remain server-side only. Never put
+PayPal client secrets in Flutter, SQL, or source control:
 
 ```text
 PAYPAL_SANDBOX_CLIENT_ID=your-sandbox-client-id
@@ -64,8 +89,9 @@ returns unavailable while the PayPal checkout kill switch is off.
 
 The app supports native Circle USDC on Polygon PoS (chain ID `137`), not
 bridged `USDC.e`. Set these variables in the production PHP-FPM/Apache
-environment; never put an RPC provider key or wallet seed/private key in the
-app or source control:
+environment until an admin profile is saved; after that, the admin profile
+overrides them. Never put an RPC provider key or wallet seed/private key in
+the app or source control:
 
 ```text
 POLYGON_USDC_ENABLED=0
@@ -78,11 +104,10 @@ POLYGON_USDC_MIN_CONFIRMATIONS=64
 Use an HTTPS RPC endpoint and a dedicated receiving address controlled by the
 project owner. The receiving address is public; its private key must remain
 offline or in a properly secured wallet. The server does not need the wallet's
-private key. The API only enables checkouts when cURL, the HTTPS RPC URL, a
-valid non-zero receiving address, and a confirmation threshold of at least 64
-are configured and `POLYGON_USDC_ENABLED` is explicitly set to `1` or `true`.
-`POLYGON_USDC_NETWORK` must explicitly be `mainnet` or `amoy`. The payment
-switch defaults to disabled. Restart PHP-FPM or Apache after setting variables.
+private key. The API only enables checkouts when cURL, a valid HTTPS RPC URL,
+a valid non-zero receiving address, and a confirmation threshold of at least
+64 are configured and the profile is enabled. Network-specific settings are
+managed in the admin portal.
 
 Each checkout is valid for 24 hours and receives a unique exact USDC amount
 whose fractional difference from the package price is less than `0.01 USDC`.
@@ -123,10 +148,11 @@ requirements before accepting payments.
 
 ## Solana coin top-ups
 
-Solana supports native SOL, Circle USDC, and Tether USDT. Configure a separate
-Solana RPC endpoint and receiving wallet; the server never needs the wallet's
-private key. Checkout stays disabled unless `SOLANA_ENABLED` is explicitly set
-to `1` or `true` and the network, HTTPS RPC URL, and receiving address are
+New Solana top-ups currently support native SOL only. Configure the selected
+Solana network, HTTPS RPC URL, and public receiving address in the admin Wallet
+& Transactions tab. Legacy `SOLANA_*` environment variables are used until an
+admin profile is saved. The server never needs the wallet's private key.
+Checkout stays disabled unless the profile is enabled and its settings are
 valid.
 
 ```text
@@ -137,24 +163,12 @@ SOLANA_RECEIVER_ADDRESS=YourBase58ReceivingAddress
 COINGECKO_API_KEY=optional-demo-api-key
 ```
 
-Mainnet token mints are validated against the official [Circle USDC
-address](https://developers.circle.com/stablecoins/usdc-contract-addresses) and
-[Tether Solana USDT address](https://tether.to/en/supported-protocols/):
-
-- USDC: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
-- USDT: `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB`
-
-The receiving wallet must already have the associated token account for each
-stablecoin it accepts. Create and verify these token accounts before enabling
-USDC/USDT checkout.
-
 Native SOL checkout fetches a current SOL/USD quote from CoinGecko, stores the
 rate on the order, and locks that amount for 15 minutes. The quote is cached
 server-side briefly to respect public API limits. A missing, stale, or invalid
-quote fails checkout rather than using a fallback price. Stablecoin
-orders are valid for 24 hours and use a unique exact amount. The verifier
-requires a finalized Solana transaction with the matching asset, mint,
-recipient, amount, and order time window before crediting coins.
+quote fails checkout rather than using a fallback price. The verifier requires
+a finalized Solana transaction with the matching recipient, amount, and order
+time window before crediting coins.
 
 For safe testing, use a separate staging backend and database:
 
@@ -169,14 +183,9 @@ Point a staging app build at the staging API (never the production API) with
 `--dart-define=API_BASE_URL=https://staging.example.com/api`. Without this
 override, the app continues to use the production API URL.
 
-Devnet supports test SOL and Circle's test USDC mint
-`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`; obtain test SOL from the
-[Solana faucet](https://faucet.solana.com/) and test USDC from the
-[Circle faucet](https://faucet.circle.com/). Tether does not provide an
-official devnet USDT mint. `SOLANA_USDT_MINT` may only be set on a staging
-devnet to test against a custom six-decimal mock token; it is not real USDT.
-Devnet credits are recorded as `sandbox_mock`. Never enable devnet on a
-production database.
+Solana Devnet currently enables native SOL top-ups only. Obtain test SOL from
+the [Solana faucet](https://faucet.solana.com/). Devnet credits are recorded as
+`sandbox_mock`. Never enable devnet on a production database.
 
 Party music playback is not implemented yet. The shop exposes profile frames
 and avatars only; legacy Party-frame records are hidden and cannot be purchased

@@ -105,10 +105,7 @@ try {
         throw new DomainException('The stored Solana payment amount does not match its package.');
     }
 
-    assertSolanaNetwork($settings);
-    if ($expectedMint !== null) {
-        assertSolanaStablecoinMint($settings, $expectedMint);
-    }
+    assertSolanaCluster($settings);
     $verification = solanaVerifyTransaction(
         $settings,
         $signature,

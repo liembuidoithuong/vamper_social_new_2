@@ -189,10 +189,7 @@ function solanaRpc(array $settings, string $method, array $params = []): mixed
 
 function assertSolanaNetwork(array $settings): void
 {
-    $genesisHash = solanaRpc($settings, 'getGenesisHash');
-    if (!is_string($genesisHash) || !hash_equals($settings['genesis_hash'], $genesisHash)) {
-        throw new RuntimeException('The configured RPC endpoint is not on the selected Solana network.');
-    }
+    assertSolanaCluster($settings);
     $health = solanaRpc($settings, 'getHealth');
     if ($health !== 'ok') {
         throw new RuntimeException('The selected Solana RPC endpoint is not healthy.');
@@ -203,6 +200,14 @@ function assertSolanaNetwork(array $settings): void
     ]);
     if (!is_array($balance) || !is_int($balance['value'] ?? null)) {
         throw new RuntimeException('The configured Solana receiving address is invalid.');
+    }
+}
+
+function assertSolanaCluster(array $settings): void
+{
+    $genesisHash = solanaRpc($settings, 'getGenesisHash');
+    if (!is_string($genesisHash) || !hash_equals($settings['genesis_hash'], $genesisHash)) {
+        throw new RuntimeException('The configured RPC endpoint is not on the selected Solana network.');
     }
 }
 

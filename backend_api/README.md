@@ -146,6 +146,13 @@ transfers are generally irreversible; incorrect network, token, address, or
 amount may be unrecoverable. Review applicable legal, tax, and app store
 requirements before accepting payments.
 
+The Coin Store can display fresh CoinGecko market references for the currently
+enabled payment assets (SOL and USDC). The displayed quote includes its provider
+timestamp and can be manually refreshed; a quote-feed outage does not disable
+checkout. Testnet assets have no real market value. Solana order amounts use a
+separate quote captured and locked when the order is created. Solana USDT is
+not enabled for new checkouts.
+
 ## Solana coin top-ups
 
 New Solana top-ups currently support native SOL only. Configure the selected

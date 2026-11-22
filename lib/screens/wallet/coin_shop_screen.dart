@@ -45,6 +45,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   bool get _isSelectedTestnet =>
       (_selectedMethod?['network']?.toString() ?? '').contains('testnet');
 
+  int get _activeOpenCryptoOrderCount => _openCryptoOrders
+      .where((order) => order['is_expired'] != true)
+      .length;
+
   @override
   void initState() {
     super.initState();
@@ -120,149 +124,300 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     }
   }
 
-  Widget _buildOpenCryptoOrdersSection(AuthController authController) {
-    if (_openCryptoOrders.isEmpty && _openCryptoOrdersError == null) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Continue a top-up',
-                  style: TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
+  Future<void> _showOpenCryptoOrdersSheet(
+    AuthController authController,
+  ) async {
+    final selectedOrder = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetBuilderContext, setSheetState) {
+            return SafeArea(
+              child: Container(
+                height: MediaQuery.sizeOf(sheetBuilderContext).height * 0.78,
+                decoration: const BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(26),
                   ),
                 ),
-              ),
-              IconButton(
-                tooltip: 'Refresh open top-ups',
-                visualDensity: VisualDensity.compact,
-                onPressed: _isLoadingOpenCryptoOrders
-                    ? null
-                    : _loadOpenCryptoOrders,
-                icon: _isLoadingOpenCryptoOrders
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(
-                        Icons.refresh_rounded,
-                        color: AppColors.primary,
-                      ),
-              ),
-            ],
-          ),
-          if (_openCryptoOrdersError != null)
-            Text(
-              'Could not load previous checkouts: $_openCryptoOrdersError',
-              style: const TextStyle(
-                color: AppColors.error,
-                fontSize: 12,
-                height: 1.4,
-              ),
-            )
-          else
-            ..._openCryptoOrders.map((order) {
-              final expired = order['is_expired'] == true;
-              final coins = order['coins'];
-              final asset = order['asset'];
-              final amount = order['amount'];
-              final network = order['network'];
-              final expiresInMinutes =
-                  int.tryParse(order['expires_in_minutes']?.toString() ?? '') ??
-                  0;
-              final expiresLabel = expiresInMinutes >= 60
-                  ? expiresInMinutes % 60 == 0
-                        ? '${expiresInMinutes ~/ 60}h'
-                        : '${expiresInMinutes ~/ 60}h ${expiresInMinutes % 60}m'
-                  : '$expiresInMinutes min';
-
-              return Container(
-                margin: const EdgeInsets.only(top: 8),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: expired
-                      ? AppColors.error.withValues(alpha: 0.06)
-                      : AppColors.softGradient.colors.first.withValues(
-                          alpha: 0.42,
-                        ),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: (expired ? AppColors.error : AppColors.primary)
-                        .withValues(alpha: 0.15),
-                  ),
-                ),
-                child: Row(
+                child: Column(
                   children: [
-                    Icon(
-                      expired
-                          ? Icons.history_rounded
-                          : Icons.account_balance_wallet_outlined,
-                      size: 20,
-                      color: expired ? AppColors.error : AppColors.primary,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
+                      child: Row(
                         children: [
-                          Text(
-                            '$coins VPC · $amount $asset',
-                            style: const TextStyle(
-                              color: AppColors.textPrimary,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'My top-ups',
+                                  style: TextStyle(
+                                    color: AppColors.textPrimary,
+                                    fontSize: 19,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                SizedBox(height: 3),
+                                Text(
+                                  'Resume or verify an existing checkout',
+                                  style: TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(height: 3),
-                          Text(
-                            expired
-                                ? '$network · Expired: verify only if already paid before expiry'
-                                : '$network · Expires in $expiresLabel',
-                            style: TextStyle(
-                              color: expired
-                                  ? AppColors.error
-                                  : AppColors.textSecondary,
-                              fontSize: 10,
-                              height: 1.3,
-                            ),
+                          IconButton(
+                            tooltip: 'Refresh top-ups',
+                            onPressed: _isLoadingOpenCryptoOrders
+                                ? null
+                                : () async {
+                                    setSheetState(() {});
+                                    await _loadOpenCryptoOrders();
+                                    if (sheetContext.mounted) {
+                                      setSheetState(() {});
+                                    }
+                                  },
+                            icon: _isLoadingOpenCryptoOrders
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.refresh_rounded,
+                                    color: AppColors.primary,
+                                  ),
+                          ),
+                          IconButton(
+                            tooltip: 'Close',
+                            onPressed: () => Navigator.pop(sheetContext),
+                            icon: const Icon(Icons.close_rounded),
                           ),
                         ],
                       ),
                     ),
-                    TextButton(
-                      onPressed: _isLoadingOpenCryptoOrders
-                          ? null
-                          : () => _resumeCryptoOrder(authController, order),
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        foregroundColor: AppColors.primary,
-                      ),
-                      child: Text(expired ? 'Verify' : 'Resume'),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: _isLoadingOpenCryptoOrders &&
+                              _openCryptoOrders.isEmpty
+                          ? const Center(
+                              child: CircularProgressIndicator(
+                                color: AppColors.primary,
+                              ),
+                            )
+                          : _openCryptoOrdersError != null &&
+                                _openCryptoOrders.isEmpty
+                          ? _buildOpenOrdersError(
+                              onRetry: () async {
+                                final refresh = _loadOpenCryptoOrders();
+                                setSheetState(() {});
+                                await refresh;
+                                if (sheetContext.mounted) {
+                                  setSheetState(() {});
+                                }
+                              },
+                            )
+                          : _openCryptoOrders.isEmpty
+                          ? _buildNoOpenOrders()
+                          : ListView.separated(
+                              padding: const EdgeInsets.all(16),
+                              itemCount: _openCryptoOrders.length,
+                              separatorBuilder: (context, index) =>
+                                  const SizedBox(height: 10),
+                              itemBuilder: (context, index) {
+                                final order = _openCryptoOrders[index];
+                                return _buildOpenOrderTile(
+                                  order,
+                                  onTap: () => Navigator.pop(
+                                    sheetContext,
+                                    order,
+                                  ),
+                                );
+                              },
+                            ),
                     ),
                   ],
                 ),
-              );
-            }),
-        ],
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (selectedOrder != null && mounted) {
+      _resumeCryptoOrder(authController, selectedOrder);
+    }
+  }
+
+  Widget _buildOpenOrdersError({required VoidCallback onRetry}) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_outlined,
+              color: AppColors.error,
+              size: 36,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Could not load top-ups: $_openCryptoOrdersError',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Try again'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoOpenOrders() {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.receipt_long_outlined,
+              color: AppColors.textLight,
+              size: 42,
+            ),
+            SizedBox(height: 12),
+            Text(
+              'No open top-ups',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+              ),
+            ),
+            SizedBox(height: 5),
+            Text(
+              'Any checkout you start will appear here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOpenOrderTile(
+    Map<String, dynamic> order, {
+    required VoidCallback onTap,
+  }) {
+    final expired = order['is_expired'] == true;
+    final coins = order['coins'];
+    final asset = order['asset'];
+    final amount = order['amount'];
+    final network = order['network'];
+    final expiresInMinutes =
+        int.tryParse(order['expires_in_minutes']?.toString() ?? '') ?? 0;
+    final expiresLabel = expiresInMinutes >= 60
+        ? expiresInMinutes % 60 == 0
+              ? '${expiresInMinutes ~/ 60}h'
+              : '${expiresInMinutes ~/ 60}h ${expiresInMinutes % 60}m'
+        : '$expiresInMinutes min';
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: (expired ? AppColors.error : AppColors.primary)
+                  .withValues(alpha: 0.16),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: (expired ? AppColors.error : AppColors.primary)
+                      .withValues(alpha: 0.09),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  expired
+                      ? Icons.history_rounded
+                      : Icons.account_balance_wallet_outlined,
+                  size: 20,
+                  color: expired ? AppColors.error : AppColors.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$coins VPC · $amount $asset',
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      expired
+                          ? '$network · Expired — verify only if already paid'
+                          : '$network · Expires in $expiresLabel',
+                      style: TextStyle(
+                        color: expired
+                            ? AppColors.error
+                            : AppColors.textSecondary,
+                        fontSize: 11,
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                expired ? 'Verify' : 'Resume',
+                style: TextStyle(
+                  color: expired ? AppColors.error : AppColors.primary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -500,6 +655,48 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         ),
         centerTitle: true,
         iconTheme: const IconThemeData(color: AppColors.textPrimary),
+        actions: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              IconButton(
+                tooltip: 'My top-ups',
+                onPressed: () => _showOpenCryptoOrdersSheet(authController),
+                icon: const Icon(
+                  Icons.receipt_long_outlined,
+                  color: AppColors.primary,
+                ),
+              ),
+              if (_activeOpenCryptoOrderCount > 0)
+                Positioned(
+                  top: 5,
+                  right: 4,
+                  child: Container(
+                    constraints: const BoxConstraints(
+                      minWidth: 17,
+                      minHeight: 17,
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    decoration: const BoxDecoration(
+                      color: AppColors.error,
+                      shape: BoxShape.circle,
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      _activeOpenCryptoOrderCount > 9
+                          ? '9+'
+                          : '$_activeOpenCryptoOrderCount',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
@@ -727,8 +924,6 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                 ),
               ),
             ],
-
-            _buildOpenCryptoOrdersSection(authController),
 
             if (_canPurchase) ...[
               DropdownButtonFormField<String>(

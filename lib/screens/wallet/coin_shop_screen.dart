@@ -1589,14 +1589,16 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           color: Colors.white,
                         ),
                       )
-                    : const Row(
+                    : Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.verified_rounded, size: 18),
-                          SizedBox(width: 7),
+                          const Icon(Icons.verified_rounded, size: 18),
+                          const SizedBox(width: 7),
                           Text(
                             paymentCompleted ? 'Done' : 'Verify payment',
-                            style: TextStyle(fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ],
                       ),

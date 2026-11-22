@@ -1235,7 +1235,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     final coins = int.tryParse(order['coins']?.toString() ?? '');
     final chainId = int.tryParse(order['chain_id']?.toString() ?? '');
     final isSolana = paymentMethod?.startsWith('solana_') == true;
-    final isExpired = order['is_expired'] == true;
+    final orderMarkedExpired = order['is_expired'] == true;
     final isPolygonMainnet =
         paymentMethod == 'polygon_usdc' &&
         asset == 'USDC' &&
@@ -1292,7 +1292,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     );
     final currentEpoch = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final isExpired =
-        order['is_expired'] == true ||
+        orderMarkedExpired ||
         (expiresAtEpoch != null && expiresAtEpoch <= currentEpoch);
     _showCryptoPaymentDialog(
       authController,

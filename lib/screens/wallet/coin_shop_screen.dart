@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -17,11 +19,14 @@ class CoinShopScreen extends StatefulWidget {
 class _CoinShopScreenState extends State<CoinShopScreen> {
   String? _paymentSettingsError;
   String? _marketPricesError;
+  String? _openCryptoOrdersError;
   final List<Map<String, dynamic>> _paymentMethods = [];
+  final List<Map<String, dynamic>> _openCryptoOrders = [];
   final Map<String, Map<String, String>> _marketPrices = {};
   String? _selectedPaymentMethod;
   bool _isLoadingPaymentSettings = true;
   bool _isRefreshingMarketPrices = false;
+  bool _isLoadingOpenCryptoOrders = false;
   bool _isCreatingOrder = false;
 
   bool get _canPurchase =>
@@ -45,6 +50,221 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     super.initState();
     _loadPaymentSettings();
     _loadMarketPrices();
+    _loadOpenCryptoOrders();
+  }
+
+  Future<void> _loadOpenCryptoOrders() async {
+    if (!mounted) return;
+    setState(() {
+      _isLoadingOpenCryptoOrders = true;
+      _openCryptoOrdersError = null;
+    });
+
+    try {
+      final response = await Get.find<AuthController>().apiService.get(
+        ApiConstants.getOpenCryptoOrders,
+      );
+      if (response.data['success'] != true) {
+        throw StateError(
+          response.data['message']?.toString() ??
+              'Unable to load open crypto checkouts.',
+        );
+      }
+
+      final data = Map<String, dynamic>.from(response.data['data'] as Map);
+      final rawOrders = data['orders'];
+      if (rawOrders is! List) {
+        throw StateError('The open checkout response is invalid.');
+      }
+      final orders = <Map<String, dynamic>>[];
+      for (final rawOrder in rawOrders) {
+        if (rawOrder is! Map) {
+          throw StateError('The open checkout response is invalid.');
+        }
+        final order = Map<String, dynamic>.from(rawOrder);
+        final method = order['payment_method']?.toString();
+        final asset = order['asset']?.toString();
+        final isValidMethod =
+            (method == 'polygon_usdc' && asset == 'USDC') ||
+            (method == 'solana_sol' && asset == 'SOL') ||
+            (method == 'solana_usdc' && asset == 'USDC') ||
+            (method == 'solana_usdt' && asset == 'USDT');
+        if (!isValidMethod ||
+            order['checkout_id'] == null ||
+            int.tryParse(order['coins']?.toString() ?? '') == null ||
+            order['amount'] == null ||
+            order['network'] == null ||
+            order['recipient_address'] == null) {
+          throw StateError('The open checkout response is invalid.');
+        }
+        orders.add(order);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _openCryptoOrders
+          ..clear()
+          ..addAll(orders);
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _openCryptoOrdersError = error
+            .toString()
+            .replaceFirst('Bad state: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingOpenCryptoOrders = false);
+      }
+    }
+  }
+
+  Widget _buildOpenCryptoOrdersSection(AuthController authController) {
+    if (_openCryptoOrders.isEmpty && _openCryptoOrdersError == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Continue a top-up',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Refresh open top-ups',
+                visualDensity: VisualDensity.compact,
+                onPressed: _isLoadingOpenCryptoOrders
+                    ? null
+                    : _loadOpenCryptoOrders,
+                icon: _isLoadingOpenCryptoOrders
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(
+                        Icons.refresh_rounded,
+                        color: AppColors.primary,
+                      ),
+              ),
+            ],
+          ),
+          if (_openCryptoOrdersError != null)
+            Text(
+              'Could not load previous checkouts: $_openCryptoOrdersError',
+              style: const TextStyle(
+                color: AppColors.error,
+                fontSize: 12,
+                height: 1.4,
+              ),
+            )
+          else
+            ..._openCryptoOrders.map((order) {
+              final expired = order['is_expired'] == true;
+              final coins = order['coins'];
+              final asset = order['asset'];
+              final amount = order['amount'];
+              final network = order['network'];
+              final expiresInMinutes =
+                  int.tryParse(order['expires_in_minutes']?.toString() ?? '') ??
+                  0;
+              final expiresLabel = expiresInMinutes >= 60
+                  ? expiresInMinutes % 60 == 0
+                        ? '${expiresInMinutes ~/ 60}h'
+                        : '${expiresInMinutes ~/ 60}h ${expiresInMinutes % 60}m'
+                  : '$expiresInMinutes min';
+
+              return Container(
+                margin: const EdgeInsets.only(top: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: expired
+                      ? AppColors.error.withValues(alpha: 0.06)
+                      : AppColors.softGradient.colors.first.withValues(
+                          alpha: 0.42,
+                        ),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: (expired ? AppColors.error : AppColors.primary)
+                        .withValues(alpha: 0.15),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      expired
+                          ? Icons.history_rounded
+                          : Icons.account_balance_wallet_outlined,
+                      size: 20,
+                      color: expired ? AppColors.error : AppColors.primary,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '$coins VPC · $amount $asset',
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            expired
+                                ? '$network · Expired: verify only if already paid before expiry'
+                                : '$network · Expires in $expiresLabel',
+                            style: TextStyle(
+                              color: expired
+                                  ? AppColors.error
+                                  : AppColors.textSecondary,
+                              fontSize: 10,
+                              height: 1.3,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _isLoadingOpenCryptoOrders
+                          ? null
+                          : () => _resumeCryptoOrder(authController, order),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor: AppColors.primary,
+                      ),
+                      child: Text(expired ? 'Verify' : 'Resume'),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadMarketPrices() async {
@@ -507,6 +727,8 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                 ),
               ),
             ],
+
+            _buildOpenCryptoOrdersSection(authController),
 
             if (_canPurchase) ...[
               DropdownButtonFormField<String>(
@@ -973,7 +1195,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         authController,
         checkoutId: checkoutId,
         coins: coins,
-        amount: amount,
+        amount: amount!,
         asset: asset,
         network: chainId == null ? network : '$network (Chain ID $chainId)',
         tokenMint: tokenMint,
@@ -985,6 +1207,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
       );
     } catch (error) {
       if (mounted) {
+        await _loadOpenCryptoOrders();
+      }
+      if (mounted) {
         Get.snackbar(
           'Unable to start crypto payment',
           error.toString().replaceFirst('Bad state: ', ''),
@@ -994,6 +1219,100 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     } finally {
       if (mounted) setState(() => _isCreatingOrder = false);
     }
+  }
+
+  void _resumeCryptoOrder(
+    AuthController authController,
+    Map<String, dynamic> order,
+  ) {
+    final checkoutId = order['checkout_id']?.toString();
+    final paymentMethod = order['payment_method']?.toString();
+    final amount = order['amount']?.toString();
+    final asset = order['asset']?.toString();
+    final network = order['network']?.toString();
+    final recipient = order['recipient_address']?.toString();
+    final tokenMint = order['token_mint']?.toString();
+    final coins = int.tryParse(order['coins']?.toString() ?? '');
+    final chainId = int.tryParse(order['chain_id']?.toString() ?? '');
+    final isSolana = paymentMethod?.startsWith('solana_') == true;
+    final isExpired = order['is_expired'] == true;
+    final isPolygonMainnet =
+        paymentMethod == 'polygon_usdc' &&
+        asset == 'USDC' &&
+        chainId == 137 &&
+        network == 'Polygon PoS' &&
+        tokenMint?.toLowerCase() ==
+            '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
+    final isPolygonAmoy =
+        paymentMethod == 'polygon_usdc' &&
+        asset == 'USDC' &&
+        chainId == 80002 &&
+        network == 'Polygon PoS Amoy (testnet)' &&
+        tokenMint?.toLowerCase() ==
+            '0x41e94eb019c0762f9bfcf9fb1e58725bfb0e7582';
+    final isValidSolana =
+        isSolana &&
+        ((paymentMethod == 'solana_sol' && asset == 'SOL') ||
+            (paymentMethod == 'solana_usdc' && asset == 'USDC') ||
+            (paymentMethod == 'solana_usdt' && asset == 'USDT')) &&
+        (network == 'Solana Mainnet' ||
+            network == 'Solana Devnet (testnet)') &&
+        (asset == 'SOL'
+            ? tokenMint == null || tokenMint.isEmpty
+            : tokenMint != null &&
+                RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(tokenMint));
+    final validAmount =
+        amount != null &&
+        RegExp(asset == 'SOL' ? r'^\d+\.\d{9}$' : r'^\d+\.\d{1,6}$').hasMatch(
+          amount,
+        );
+    final validRecipient =
+        recipient != null &&
+        (isSolana
+            ? RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(recipient)
+            : RegExp(r'^0x[a-fA-F0-9]{40}$').hasMatch(recipient));
+
+    if (checkoutId == null ||
+        coins == null ||
+        !validAmount ||
+        !validRecipient ||
+        !(isPolygonMainnet || isPolygonAmoy || isValidSolana)) {
+      Get.snackbar(
+        'Unable to reopen checkout',
+        'The saved checkout details are invalid. Do not send funds to this order.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return;
+    }
+
+    final expiresInMinutes =
+        int.tryParse(order['expires_in_minutes']?.toString() ?? '') ?? 0;
+    final expiresAtEpoch = int.tryParse(
+      order['expires_at_epoch']?.toString() ?? '',
+    );
+    final currentEpoch = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final isExpired =
+        order['is_expired'] == true ||
+        (expiresAtEpoch != null && expiresAtEpoch <= currentEpoch);
+    _showCryptoPaymentDialog(
+      authController,
+      checkoutId: checkoutId,
+      coins: coins,
+      amount: amount!,
+      asset: asset!,
+      network: chainId == null ? network! : '$network (Chain ID $chainId)',
+      tokenMint: tokenMint == null || tokenMint.isEmpty ? null : tokenMint,
+      solPriceUsd: order['sol_price_usd']?.toString(),
+      paymentMethod: paymentMethod!,
+      expiresInMinutes: expiresInMinutes,
+      isTestnet:
+          network!.contains('testnet') ||
+          network == 'Polygon PoS Amoy (testnet)',
+      isExpired: isExpired,
+      expiresAtEpoch: expiresAtEpoch,
+      isResumed: true,
+      recipient: recipient,
+    );
   }
 
   void _showCryptoPaymentDialog(
@@ -1007,21 +1326,53 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     required int expiresInMinutes,
     required bool isTestnet,
     required String recipient,
+    bool isExpired = false,
+    int? expiresAtEpoch,
+    bool isResumed = false,
     String? tokenMint,
     String? solPriceUsd,
   }) {
     final isSolana = paymentMethod.startsWith('solana_');
-    final validityPeriod = expiresInMinutes >= 60
-        ? '${expiresInMinutes ~/ 60} hours'
-        : '$expiresInMinutes minutes';
     final transactionHashController = TextEditingController();
+    Timer? expiryTimer;
     var isVerifying = false;
+    var remainingMinutes = expiresInMinutes;
+    var orderHasExpired =
+        isExpired ||
+        (expiresAtEpoch != null &&
+            expiresAtEpoch <= DateTime.now().millisecondsSinceEpoch ~/ 1000);
     var paymentCompleted = false;
     var verificationMessageIsError = false;
     String? verificationMessage;
     Get.dialog(
       StatefulBuilder(
         builder: (dialogContext, setDialogState) {
+          if (expiresAtEpoch != null &&
+              expiryTimer == null &&
+              !orderHasExpired) {
+            expiryTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+              final secondsRemaining =
+                  expiresAtEpoch - DateTime.now().millisecondsSinceEpoch ~/ 1000;
+              final nextMinutes = secondsRemaining <= 0
+                  ? 0
+                  : (secondsRemaining + 59) ~/ 60;
+              if (dialogContext.mounted &&
+                  (secondsRemaining <= 0 ||
+                      nextMinutes != remainingMinutes)) {
+                setDialogState(() {
+                  remainingMinutes = nextMinutes;
+                  orderHasExpired = secondsRemaining <= 0;
+                });
+              }
+              if (secondsRemaining <= 0) timer.cancel();
+            });
+          }
+          final isOrderExpired = orderHasExpired;
+          final remainingLabel = remainingMinutes >= 60
+              ? remainingMinutes % 60 == 0
+                    ? '${remainingMinutes ~/ 60} hours'
+                    : '${remainingMinutes ~/ 60} hours ${remainingMinutes % 60} minutes'
+              : '$remainingMinutes minutes';
           final verificationColor = paymentCompleted
               ? AppColors.success
               : verificationMessageIsError
@@ -1119,7 +1470,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                'Send exactly $amount $asset',
+                                isOrderExpired
+                                    ? 'Order amount: $amount $asset'
+                                    : 'Send exactly $amount $asset',
                                 style: const TextStyle(
                                   fontSize: 14,
                                   color: AppColors.primary,
@@ -1132,11 +1485,13 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                         IconButton(
                           tooltip: 'Copy exact amount',
                           visualDensity: VisualDensity.compact,
-                          onPressed: () async {
-                            await Clipboard.setData(
-                              ClipboardData(text: amount),
-                            );
-                          },
+                          onPressed: isOrderExpired
+                              ? null
+                              : () async {
+                                  await Clipboard.setData(
+                                    ClipboardData(text: amount),
+                                  );
+                                },
                           icon: const Icon(
                             Icons.copy_rounded,
                             size: 19,
@@ -1178,7 +1533,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                'Valid for $validityPeriod · exact amount required',
+                                isOrderExpired
+                                    ? 'Expired · verify only if already paid before expiry'
+                                    : 'Valid for $remainingLabel · exact amount required',
                                 style: const TextStyle(
                                   color: AppColors.textSecondary,
                                   fontSize: 11,
@@ -1190,6 +1547,37 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                       ],
                     ),
                   ),
+                  if (isResumed && !isOrderExpired) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(11),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.info_outline_rounded,
+                            color: AppColors.primary,
+                            size: 18,
+                          ),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'This is an existing checkout. If you already sent the payment, do not send it again; enter the original transaction signature below.',
+                              style: TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 11,
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   if (asset == 'SOL' && solPriceUsd != null) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -1214,11 +1602,13 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                         ),
                       ),
                       TextButton.icon(
-                        onPressed: () async {
-                          await Clipboard.setData(
-                            ClipboardData(text: recipient),
-                          );
-                        },
+                        onPressed: isOrderExpired
+                            ? null
+                            : () async {
+                                await Clipboard.setData(
+                                  ClipboardData(text: recipient),
+                                );
+                              },
                         icon: const Icon(Icons.copy_rounded, size: 15),
                         label: const Text('Copy'),
                         style: TextButton.styleFrom(
@@ -1260,11 +1650,13 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           ),
                         ),
                         TextButton.icon(
-                          onPressed: () async {
-                            await Clipboard.setData(
-                              ClipboardData(text: tokenMint),
-                            );
-                          },
+                          onPressed: isOrderExpired
+                              ? null
+                              : () async {
+                                  await Clipboard.setData(
+                                    ClipboardData(text: tokenMint),
+                                  );
+                                },
                           icon: const Icon(Icons.copy_rounded, size: 15),
                           label: const Text('Copy'),
                           style: TextButton.styleFrom(
@@ -1296,11 +1688,13 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: (isTestnet ? AppColors.error : AppColors.accent)
+                      color: (isOrderExpired || isTestnet
+                              ? AppColors.error
+                              : AppColors.accent)
                           .withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                        color: (isTestnet
+                        color: (isOrderExpired || isTestnet
                                 ? AppColors.error
                                 : AppColors.accent)
                             .withValues(alpha: 0.2),
@@ -1310,18 +1704,20 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Icon(
-                          isTestnet
+                          isTestnet || isOrderExpired
                               ? Icons.warning_amber_rounded
                               : Icons.info_outline_rounded,
                           size: 18,
-                          color: isTestnet
+                          color: isTestnet || isOrderExpired
                               ? AppColors.error
                               : AppColors.primary,
                         ),
                         const SizedBox(width: 9),
                         Expanded(
                           child: Text(
-                            isTestnet
+                            isOrderExpired
+                                ? 'ORDER EXPIRED: Do not send funds now. If you already paid before expiry, paste that transaction signature to verify it.'
+                                : isTestnet
                                 ? 'TESTNET ONLY: Test tokens have no real value. Never send mainnet funds.'
                                 : isSolana
                                 ? 'Send only $asset on this network. SOL is also needed for network fees. Transfers are usually irreversible.'
@@ -1329,10 +1725,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                             style: TextStyle(
                               fontSize: 11,
                               height: 1.35,
-                              color: isTestnet
+                              color: isTestnet || isOrderExpired
                                   ? AppColors.error
                                   : AppColors.textSecondary,
-                              fontWeight: isTestnet
+                              fontWeight: isTestnet || isOrderExpired
                                   ? FontWeight.w700
                                   : FontWeight.normal,
                             ),
@@ -1375,8 +1771,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                     textInputAction: TextInputAction.done,
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                    'After sending, paste the transaction signature here. Coins are added only after the server verifies the finalized transfer.',
+                  Text(
+                    isOrderExpired
+                        ? 'Only transactions sent before this order expired can be verified and credited.'
+                        : 'After sending, paste the transaction signature here. Coins are added only after the server verifies the finalized transfer.',
                     style: const TextStyle(
                       fontSize: 12,
                       color: AppColors.textSecondary,
@@ -1608,6 +2006,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         },
       ),
       barrierDismissible: false,
-    ).whenComplete(transactionHashController.dispose);
+    ).whenComplete(() {
+      expiryTimer?.cancel();
+      transactionHashController.dispose();
+      if (mounted) _loadOpenCryptoOrders();
+    });
   }
 }

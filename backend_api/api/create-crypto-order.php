@@ -58,7 +58,9 @@ try {
     );
     $userActiveQuery->execute([':user_id' => $userId]);
     if ((int)$userActiveQuery->fetchColumn() >= 5) {
-        throw new DomainException('You already have several open USDC checkouts. Complete one or try again later.');
+        throw new DomainException(
+            'You have several open USDC checkouts. Resume one from the Coin Store, complete or verify it, then create another.'
+        );
     }
 
     $amount = null;

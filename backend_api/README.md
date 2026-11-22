@@ -153,6 +153,13 @@ checkout. Testnet assets have no real market value. Solana order amounts use a
 separate quote captured and locked when the order is created. Solana USDT is
 not enabled for new checkouts.
 
+The Coin Store also loads the user's open crypto checkouts so a dismissed
+payment dialog can be reopened with its original amount, network, token, and
+recipient. This lets users finish or verify existing orders instead of creating
+duplicates. Expired orders remain available for verification only; the payment
+must have been sent before the order's original expiry. The five-open-order
+per-user limit remains in place for each payment network as a safety measure.
+
 ## Solana coin top-ups
 
 New Solana top-ups currently support native SOL only. Configure the selected

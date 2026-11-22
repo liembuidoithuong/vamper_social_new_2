@@ -1123,11 +1123,6 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                             await Clipboard.setData(
                               ClipboardData(text: amount),
                             );
-                            Get.snackbar(
-                              'Copied',
-                              'Exact $asset amount copied.',
-                              snackPosition: SnackPosition.BOTTOM,
-                            );
                           },
                           icon: const Icon(
                             Icons.copy_rounded,
@@ -1210,11 +1205,6 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           await Clipboard.setData(
                             ClipboardData(text: recipient),
                           );
-                          Get.snackbar(
-                            'Copied',
-                            'Recipient address copied.',
-                            snackPosition: SnackPosition.BOTTOM,
-                          );
                         },
                         icon: const Icon(Icons.copy_rounded, size: 15),
                         label: const Text('Copy'),
@@ -1260,11 +1250,6 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           onPressed: () async {
                             await Clipboard.setData(
                               ClipboardData(text: tokenMint),
-                            );
-                            Get.snackbar(
-                              'Copied',
-                              'Token mint copied.',
-                              snackPosition: SnackPosition.BOTTOM,
                             );
                           },
                           icon: const Icon(Icons.copy_rounded, size: 15),
@@ -1466,10 +1451,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                               );
                           if (!dialogContext.mounted) return;
                           if (result['status'] == 'completed') {
-                            Navigator.of(
-                              dialogContext,
-                              rootNavigator: true,
-                            ).pop();
+                            Get.back();
                           } else {
                             setDialogState(() => isVerifying = false);
                           }

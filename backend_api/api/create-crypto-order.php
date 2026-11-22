@@ -41,7 +41,8 @@ try {
 
     $activeQuery = $db->prepare(
         "SELECT amount_usdc FROM crypto_checkout_orders
-         WHERE status = 'pending' AND coins = :coins"
+         WHERE coins = :coins
+           AND (status = 'pending' OR (status = 'cancelled' AND expires_at > NOW()))"
     );
     $activeQuery->execute([':coins' => $coins]);
     $usedSuffixes = [];
@@ -59,7 +60,7 @@ try {
     $userActiveQuery->execute([':user_id' => $userId]);
     if ((int)$userActiveQuery->fetchColumn() >= 5) {
         throw new DomainException(
-            'You have several open USDC checkouts. Resume one from the Coin Store, complete or verify it, then create another.'
+            'You have several open USDC checkouts. Complete, verify, or remove an unpaid checkout from My top-ups before creating another.'
         );
     }
 

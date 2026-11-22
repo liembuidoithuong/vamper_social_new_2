@@ -60,6 +60,8 @@ class ApiConstants {
       '$baseUrl/get-crypto-market-prices.php';
   static String get getOpenCryptoOrders =>
       '$baseUrl/get-open-crypto-orders.php';
+  static String get deleteOpenCryptoOrder =>
+      '$baseUrl/delete-open-crypto-order.php';
   static String get createCryptoOrder => '$baseUrl/create-crypto-order.php';
   static String get verifyCryptoPayment => '$baseUrl/verify-crypto-payment.php';
   static String get createSolanaOrder => '$baseUrl/create-solana-order.php';

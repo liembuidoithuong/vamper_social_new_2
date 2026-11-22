@@ -20,6 +20,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   String? _paymentSettingsError;
   String? _marketPricesError;
   String? _openCryptoOrdersError;
+  String? _openCryptoOrdersMoreError;
   final List<Map<String, dynamic>> _paymentMethods = [];
   final List<Map<String, dynamic>> _openCryptoOrders = [];
   final Map<String, Map<String, String>> _marketPrices = {};
@@ -27,7 +28,14 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   bool _isLoadingPaymentSettings = true;
   bool _isRefreshingMarketPrices = false;
   bool _isLoadingOpenCryptoOrders = false;
+  bool _isLoadingMoreOpenCryptoOrders = false;
+  bool _hasMoreOpenCryptoOrders = true;
   bool _isCreatingOrder = false;
+  int _nextOpenCryptoOrdersOffset = 0;
+  int _activeOpenCryptoOrderCount = 0;
+  String? _deletingCryptoOrderId;
+  BuildContext? _openCryptoOrdersSheetContext;
+  StateSetter? _openCryptoOrdersSheetStateSetter;
 
   bool get _canPurchase =>
       !_isLoadingPaymentSettings &&
@@ -45,10 +53,6 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   bool get _isSelectedTestnet =>
       (_selectedMethod?['network']?.toString() ?? '').contains('testnet');
 
-  int get _activeOpenCryptoOrderCount => _openCryptoOrders
-      .where((order) => order['is_expired'] != true)
-      .length;
-
   @override
   void initState() {
     super.initState();
@@ -57,16 +61,32 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     _loadOpenCryptoOrders();
   }
 
-  Future<void> _loadOpenCryptoOrders() async {
-    if (!mounted) return;
+  Future<void> _loadOpenCryptoOrders({bool loadMore = false}) async {
+    if (!mounted ||
+        (loadMore &&
+            (!_hasMoreOpenCryptoOrders ||
+                _isLoadingOpenCryptoOrders ||
+                _isLoadingMoreOpenCryptoOrders)) ||
+        (!loadMore && _isLoadingMoreOpenCryptoOrders)) {
+      return;
+    }
     setState(() {
-      _isLoadingOpenCryptoOrders = true;
-      _openCryptoOrdersError = null;
+      if (loadMore) {
+        _isLoadingMoreOpenCryptoOrders = true;
+      }
+      if (!loadMore) _isLoadingOpenCryptoOrders = true;
+      if (loadMore) {
+        _openCryptoOrdersMoreError = null;
+      } else {
+        _openCryptoOrdersError = null;
+        _openCryptoOrdersMoreError = null;
+      }
     });
 
     try {
       final response = await Get.find<AuthController>().apiService.get(
         ApiConstants.getOpenCryptoOrders,
+        params: {'offset': loadMore ? _nextOpenCryptoOrdersOffset : 0},
       );
       if (response.data['success'] != true) {
         throw StateError(
@@ -77,7 +97,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
 
       final data = Map<String, dynamic>.from(response.data['data'] as Map);
       final rawOrders = data['orders'];
-      if (rawOrders is! List) {
+      final activeCount = int.tryParse(data['active_count']?.toString() ?? '');
+      if (rawOrders is! List ||
+          data['has_more'] is! bool ||
+          activeCount == null) {
         throw StateError('The open checkout response is invalid.');
       }
       final orders = <Map<String, dynamic>>[];
@@ -106,21 +129,138 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
 
       if (!mounted) return;
       setState(() {
-        _openCryptoOrders
-          ..clear()
-          ..addAll(orders);
+        if (loadMore) {
+          final existingIds = _openCryptoOrders
+              .map((order) => order['checkout_id'])
+              .toSet();
+          _openCryptoOrders.addAll(
+            orders.where(
+              (order) => !existingIds.contains(order['checkout_id']),
+            ),
+          );
+        } else {
+          _openCryptoOrders
+            ..clear()
+            ..addAll(orders);
+          _nextOpenCryptoOrdersOffset = 0;
+        }
+        _nextOpenCryptoOrdersOffset += orders.length;
+        _hasMoreOpenCryptoOrders = data['has_more'] as bool;
+        _activeOpenCryptoOrderCount = activeCount;
       });
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _openCryptoOrdersError = error
-            .toString()
-            .replaceFirst('Bad state: ', '');
+        final message = error.toString().replaceFirst('Bad state: ', '');
+        if (loadMore) {
+          _openCryptoOrdersMoreError = message;
+        } else {
+          _openCryptoOrdersError = message;
+        }
       });
     } finally {
       if (mounted) {
-        setState(() => _isLoadingOpenCryptoOrders = false);
+        setState(() {
+          _isLoadingOpenCryptoOrders = false;
+          _isLoadingMoreOpenCryptoOrders = false;
+        });
+        _notifyOpenCryptoOrdersSheet();
       }
+    }
+  }
+
+  void _notifyOpenCryptoOrdersSheet() {
+    final sheetContext = _openCryptoOrdersSheetContext;
+    final setSheetState = _openCryptoOrdersSheetStateSetter;
+    if (sheetContext != null && sheetContext.mounted && setSheetState != null) {
+      setSheetState(() {});
+    }
+  }
+
+  Future<void> _confirmAndDeleteCryptoOrder(
+    BuildContext sheetContext,
+    AuthController authController,
+    Map<String, dynamic> order,
+    StateSetter setSheetState,
+  ) async {
+    final checkoutId = order['checkout_id']?.toString();
+    if (checkoutId == null ||
+        _isLoadingOpenCryptoOrders ||
+        _isLoadingMoreOpenCryptoOrders ||
+        _deletingCryptoOrderId != null) {
+      return;
+    }
+
+    final shouldDelete = await showDialog<bool>(
+      context: sheetContext,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remove this checkout?'),
+        content: const Text(
+          'This removes the checkout from your list and it cannot be reopened. '
+          'If you have already sent funds or started an on-chain payment, do '
+          'not remove it—your VPC may not be credited.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep order'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Remove order'),
+          ),
+        ],
+      ),
+    );
+    if (shouldDelete != true ||
+        !mounted ||
+        _isLoadingOpenCryptoOrders ||
+        _isLoadingMoreOpenCryptoOrders ||
+        _deletingCryptoOrderId != null) {
+      return;
+    }
+
+    setState(() => _deletingCryptoOrderId = checkoutId);
+    if (sheetContext.mounted) setSheetState(() {});
+    try {
+      final response = await authController.apiService.post(
+        ApiConstants.deleteOpenCryptoOrder,
+        data: {'checkout_id': checkoutId},
+      );
+      if (response.data['success'] != true) {
+        throw StateError(
+          response.data['message']?.toString() ??
+              'Unable to remove this checkout.',
+        );
+      }
+      final wasActive = response.data['was_active'] == true;
+      if (!mounted) return;
+      setState(() {
+        _openCryptoOrders.removeWhere(
+          (existing) => existing['checkout_id'] == checkoutId,
+        );
+        if (_nextOpenCryptoOrdersOffset > 0) {
+          _nextOpenCryptoOrdersOffset--;
+        }
+        if (wasActive && _activeOpenCryptoOrderCount > 0) {
+          _activeOpenCryptoOrderCount--;
+        }
+      });
+      Get.snackbar(
+        'Checkout removed',
+        'The open top-up was removed.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } catch (error) {
+      Get.snackbar(
+        'Unable to remove checkout',
+        error.toString().replaceFirst('Bad state: ', ''),
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } finally {
+      if (mounted) setState(() => _deletingCryptoOrderId = null);
+      if (sheetContext.mounted) setSheetState(() {});
     }
   }
 
@@ -134,6 +274,8 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (sheetBuilderContext, setSheetState) {
+            _openCryptoOrdersSheetContext = sheetContext;
+            _openCryptoOrdersSheetStateSetter = setSheetState;
             return SafeArea(
               child: Container(
                 height: MediaQuery.sizeOf(sheetBuilderContext).height * 0.78,
@@ -174,7 +316,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           ),
                           IconButton(
                             tooltip: 'Refresh top-ups',
-                            onPressed: _isLoadingOpenCryptoOrders
+                            onPressed:
+                                _isLoadingOpenCryptoOrders ||
+                                    _isLoadingMoreOpenCryptoOrders
                                 ? null
                                 : () async {
                                     setSheetState(() {});
@@ -227,22 +371,108 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                             )
                           : _openCryptoOrders.isEmpty
                           ? _buildNoOpenOrders()
-                          : ListView.separated(
-                              padding: const EdgeInsets.all(16),
-                              itemCount: _openCryptoOrders.length,
-                              separatorBuilder: (context, index) =>
-                                  const SizedBox(height: 10),
-                              itemBuilder: (context, index) {
-                                final order = _openCryptoOrders[index];
-                                return _buildOpenOrderTile(
-                                  order,
-                                  onTap: () => Navigator.pop(
-                                    sheetContext,
-                                    order,
-                                  ),
-                                );
+                          : NotificationListener<ScrollNotification>(
+                              onNotification: (notification) {
+                                if (notification.metrics.extentAfter < 240 &&
+                                    _hasMoreOpenCryptoOrders &&
+                                    !_isLoadingOpenCryptoOrders &&
+                                    !_isLoadingMoreOpenCryptoOrders &&
+                                    _openCryptoOrdersMoreError == null) {
+                                  final loadMore = _loadOpenCryptoOrders(
+                                    loadMore: true,
+                                  );
+                                  setSheetState(() {});
+                                  loadMore.whenComplete(() {
+                                    if (sheetContext.mounted) {
+                                      setSheetState(() {});
+                                    }
+                                  });
+                                }
+                                return false;
                               },
-                            ),
+                              child: ListView.separated(
+                                padding: const EdgeInsets.all(16),
+                                itemCount:
+                                    _openCryptoOrders.length +
+                                    (_hasMoreOpenCryptoOrders ||
+                                            _isLoadingMoreOpenCryptoOrders ||
+                                            _openCryptoOrdersMoreError != null
+                                        ? 1
+                                        : 0),
+                                separatorBuilder: (context, index) =>
+                                    const SizedBox(height: 10),
+                                itemBuilder: (context, index) {
+                                  if (index >= _openCryptoOrders.length) {
+                                    if (_isLoadingMoreOpenCryptoOrders) {
+                                      return const Padding(
+                                        padding: EdgeInsets.all(16),
+                                        child: Center(
+                                          child: CircularProgressIndicator(
+                                            color: AppColors.primary,
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                    if (_openCryptoOrdersMoreError != null) {
+                                      return Padding(
+                                        padding: const EdgeInsets.all(12),
+                                        child: Column(
+                                          children: [
+                                            Text(
+                                              'Could not load more top-ups: '
+                                              '$_openCryptoOrdersMoreError',
+                                              textAlign: TextAlign.center,
+                                              style: const TextStyle(
+                                                color:
+                                                    AppColors.textSecondary,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            TextButton.icon(
+                                              onPressed: () async {
+                                                final loadMore =
+                                                    _loadOpenCryptoOrders(
+                                                      loadMore: true,
+                                                    );
+                                                setSheetState(() {});
+                                                await loadMore;
+                                                if (sheetContext.mounted) {
+                                                  setSheetState(() {});
+                                                }
+                                              },
+                                              icon: const Icon(
+                                                Icons.refresh_rounded,
+                                              ),
+                                              label: const Text('Try again'),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    }
+                                    return const SizedBox(height: 8);
+                                  }
+                                  final order = _openCryptoOrders[index];
+                                  return _buildOpenOrderTile(
+                                    order,
+                                    isDeleting:
+                                        _deletingCryptoOrderId ==
+                                        order['checkout_id']?.toString(),
+                                    onDelete: () =>
+                                        _confirmAndDeleteCryptoOrder(
+                                          sheetContext,
+                                          authController,
+                                          order,
+                                          setSheetState,
+                                        ),
+                                    onTap: () => Navigator.pop(
+                                      sheetContext,
+                                      order,
+                                    ),
+                                  );
+                                },
+                              ),
+                          ),
                     ),
                   ],
                 ),
@@ -253,6 +483,8 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
       },
     );
 
+    _openCryptoOrdersSheetContext = null;
+    _openCryptoOrdersSheetStateSetter = null;
     if (selectedOrder != null && mounted) {
       _resumeCryptoOrder(authController, selectedOrder);
     }
@@ -330,6 +562,8 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   Widget _buildOpenOrderTile(
     Map<String, dynamic> order, {
     required VoidCallback onTap,
+    required VoidCallback onDelete,
+    required bool isDeleting,
   }) {
     final expired = order['is_expired'] == true;
     final coins = order['coins'];
@@ -406,14 +640,35 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Text(
-                expired ? 'Verify' : 'Resume',
-                style: TextStyle(
-                  color: expired ? AppColors.error : AppColors.primary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Remove checkout',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: isDeleting ? null : onDelete,
+                    icon: isDeleting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(
+                            Icons.close_rounded,
+                            color: AppColors.error,
+                            size: 19,
+                          ),
+                  ),
+                  const SizedBox(width: 2),
+                  Text(
+                    expired ? 'Verify' : 'Resume',
+                    style: TextStyle(
+                      color: expired ? AppColors.error : AppColors.primary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

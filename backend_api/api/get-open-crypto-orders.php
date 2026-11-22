@@ -13,80 +13,110 @@ try {
     ensurePolygonUsdcPaymentSchema($db);
     ensureSolanaPaymentSchema($db);
 
-    $orders = [];
-    $polygonQuery = $db->prepare(
-        "SELECT checkout_id, coins, amount_usdc, chain_id, token_contract,
-                recipient_address, status, UNIX_TIMESTAMP(expires_at) AS expires_epoch,
-                GREATEST(0, CEIL(TIMESTAMPDIFF(SECOND, NOW(), expires_at) / 60)) AS expires_in_minutes,
-                expires_at <= NOW() AS is_expired
-         FROM crypto_checkout_orders
-         WHERE user_id = :user_id AND status IN ('pending', 'expired')
-         ORDER BY (status = 'pending') DESC, created_at DESC
-         LIMIT 50"
-    );
-    $polygonQuery->execute([':user_id' => $userId]);
-    while ($order = $polygonQuery->fetch(PDO::FETCH_ASSOC)) {
-        $chainId = (int)$order['chain_id'];
-        $network = match ($chainId) {
-            137 => 'Polygon PoS',
-            80002 => 'Polygon PoS Amoy (testnet)',
-            default => 'Polygon (Chain ID ' . $chainId . ')',
-        };
-        $orders[] = [
-            'checkout_id' => $order['checkout_id'],
-            'payment_method' => 'polygon_usdc',
-            'coins' => (int)$order['coins'],
-            'asset' => 'USDC',
-            'amount' => (string)$order['amount_usdc'],
-            'network' => $network,
-            'chain_id' => $chainId,
-            'token_mint' => $order['token_contract'],
-            'recipient_address' => $order['recipient_address'],
-            'expires_at_epoch' => (int)$order['expires_epoch'],
-            'expires_in_minutes' => (int)$order['expires_in_minutes'],
-            'is_expired' => (bool)$order['is_expired'] || $order['status'] === 'expired',
-        ];
+    $pageSize = 20;
+    $offset = filter_var($_GET['offset'] ?? 0, FILTER_VALIDATE_INT);
+    if ($offset === false || $offset < 0 || $offset > 1000000) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Invalid checkout page.']);
+        exit;
     }
 
-    $solanaQuery = $db->prepare(
-        "SELECT checkout_id, network, asset, token_mint, recipient_address,
-                amount_display, sol_price_micro_usd, coins, status,
+    $query = $db->prepare(
+        "SELECT checkout_id, payment_method, coins, asset, amount, network_key,
+                chain_id, token_mint, recipient_address, status,
+                sol_price_micro_usd,
                 UNIX_TIMESTAMP(expires_at) AS expires_epoch,
                 GREATEST(0, CEIL(TIMESTAMPDIFF(SECOND, NOW(), expires_at) / 60)) AS expires_in_minutes,
                 expires_at <= NOW() AS is_expired
-         FROM solana_checkout_orders
-         WHERE user_id = :user_id AND status IN ('pending', 'expired')
-         ORDER BY (status = 'pending') DESC, created_at DESC
-         LIMIT 50"
+         FROM (
+            SELECT checkout_id, 'polygon_usdc' AS payment_method, coins,
+                   'USDC' AS asset, amount_usdc AS amount, 'polygon' AS network_key,
+                   chain_id, token_contract AS token_mint, recipient_address,
+                   status, NULL AS sol_price_micro_usd, expires_at, created_at
+            FROM crypto_checkout_orders
+            WHERE user_id = :polygon_user_id
+              AND chain_id IN (137, 80002)
+              AND status IN ('pending', 'expired')
+            UNION ALL
+            SELECT checkout_id, CONCAT('solana_', LOWER(asset)) AS payment_method,
+                   coins, UPPER(asset) AS asset, amount_display AS amount,
+                   network AS network_key, NULL AS chain_id, token_mint,
+                   recipient_address, status, sol_price_micro_usd, expires_at, created_at
+            FROM solana_checkout_orders
+            WHERE user_id = :solana_user_id
+              AND network IN ('mainnet-beta', 'devnet')
+              AND UPPER(asset) IN ('SOL', 'USDC', 'USDT')
+              AND status IN ('pending', 'expired')
+         ) AS open_orders
+         ORDER BY created_at DESC, checkout_id DESC
+         LIMIT :page_size OFFSET :page_offset"
     );
-    $solanaQuery->execute([':user_id' => $userId]);
-    while ($order = $solanaQuery->fetch(PDO::FETCH_ASSOC)) {
-        $networkKey = (string)$order['network'];
-        if (!in_array($networkKey, ['mainnet-beta', 'devnet'], true)) {
+    $query->bindValue(':polygon_user_id', $userId, PDO::PARAM_INT);
+    $query->bindValue(':solana_user_id', $userId, PDO::PARAM_INT);
+    $query->bindValue(':page_size', $pageSize + 1, PDO::PARAM_INT);
+    $query->bindValue(':page_offset', $offset, PDO::PARAM_INT);
+    $query->execute();
+
+    $activeCountQuery = $db->prepare(
+        "SELECT
+            (SELECT COUNT(*) FROM crypto_checkout_orders
+             WHERE user_id = :polygon_count_user
+               AND status = 'pending' AND expires_at > NOW())
+            +
+            (SELECT COUNT(*) FROM solana_checkout_orders
+             WHERE user_id = :solana_count_user
+               AND status = 'pending' AND expires_at > NOW())"
+    );
+    $activeCountQuery->execute([
+        ':polygon_count_user' => $userId,
+        ':solana_count_user' => $userId,
+    ]);
+    $activeCount = (int)$activeCountQuery->fetchColumn();
+
+    $orders = [];
+    $hasMore = false;
+    $solanaSettings = [];
+    while ($order = $query->fetch(PDO::FETCH_ASSOC)) {
+        if (count($orders) === $pageSize) {
+            $hasMore = true;
+            break;
+        }
+        $method = (string)$order['payment_method'];
+        $asset = strtoupper((string)$order['asset']);
+        if ($method === 'polygon_usdc') {
+            $chainId = (int)$order['chain_id'];
+            $network = match ($chainId) {
+                137 => 'Polygon PoS',
+                80002 => 'Polygon PoS Amoy (testnet)',
+                default => 'Polygon (Chain ID ' . $chainId . ')',
+            };
+        } elseif (str_starts_with($method, 'solana_')) {
+            $networkKey = (string)$order['network_key'];
+            if (!in_array($networkKey, ['mainnet-beta', 'devnet'], true)) {
+                continue;
+            }
+            $solanaSettings[$networkKey] ??= solanaPaymentSettings($db, $networkKey);
+            $network = $solanaSettings[$networkKey]['network'];
+        } else {
             continue;
         }
-        $settings = solanaPaymentSettings($db, $networkKey);
-        $asset = strtoupper((string)$order['asset']);
         if (!in_array($asset, ['SOL', 'USDC', 'USDT'], true)) {
             continue;
         }
-        $priceMicroUsd = $order['sol_price_micro_usd'] === null
-            ? null
-            : (int)$order['sol_price_micro_usd'];
         $orders[] = [
             'checkout_id' => $order['checkout_id'],
-            'payment_method' => 'solana_' . strtolower($asset),
+            'payment_method' => $method,
             'coins' => (int)$order['coins'],
             'asset' => $asset,
-            'amount' => (string)$order['amount_display'],
-            'network' => $settings['network'],
-            'chain_id' => null,
+            'amount' => (string)$order['amount'],
+            'network' => $network,
+            'chain_id' => $order['chain_id'] === null ? null : (int)$order['chain_id'],
             'token_mint' => $order['token_mint'],
             'recipient_address' => $order['recipient_address'],
             'expires_at_epoch' => (int)$order['expires_epoch'],
-            'sol_price_usd' => $priceMicroUsd === null
+            'sol_price_usd' => $order['sol_price_micro_usd'] === null
                 ? null
-                : number_format($priceMicroUsd / 1000000, 6, '.', ''),
+                : number_format((int)$order['sol_price_micro_usd'] / 1000000, 6, '.', ''),
             'expires_in_minutes' => (int)$order['expires_in_minutes'],
             'is_expired' => (bool)$order['is_expired'] || $order['status'] === 'expired',
         ];
@@ -94,7 +124,11 @@ try {
 
     echo json_encode([
         'success' => true,
-        'data' => ['orders' => $orders],
+        'data' => [
+            'orders' => $orders,
+            'has_more' => $hasMore,
+            'active_count' => $activeCount,
+        ],
     ]);
 } catch (Throwable $error) {
     error_log('Unable to load open crypto checkouts: ' . $error->getMessage());

@@ -70,13 +70,14 @@ try {
     $userActiveQuery->execute([':user_id' => $userId]);
     if ((int)$userActiveQuery->fetchColumn() >= 5) {
         throw new DomainException(
-            'You have several open Solana checkouts. Resume one from the Coin Store, complete or verify it, then create another.'
+            'You have several open Solana checkouts. Complete, verify, or remove an unpaid checkout from My top-ups before creating another.'
         );
     }
 
     $activeAmountsQuery = $db->prepare(
         "SELECT amount_base_units FROM solana_checkout_orders
-         WHERE status = 'pending' AND asset = :asset"
+         WHERE asset = :asset
+           AND (status = 'pending' OR (status = 'cancelled' AND expires_at > NOW()))"
     );
     $activeAmountsQuery->execute([':asset' => $asset]);
     $usedAmounts = [];

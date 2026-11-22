@@ -727,6 +727,7 @@ class AuthController extends GetxController {
       }
 
       final result = Map<String, dynamic>.from(response.data['data'] as Map);
+      result['message'] = response.data['message']?.toString();
       if (result['status'] == 'completed') {
         final balance = int.tryParse(result['balance']?.toString() ?? '');
         if (balance == null) {
@@ -734,37 +735,18 @@ class AuthController extends GetxController {
             'Payment was verified but no coin balance was returned.',
           );
         }
-        await updateCachedUser(user.copyWith(coins: balance));
-        Get.snackbar(
-          'Payment complete',
-          response.data['message']?.toString() ?? 'Your coins have been added.',
-          snackPosition: SnackPosition.BOTTOM,
-          backgroundColor: AppColors.success,
-          colorText: Colors.white,
-        );
-      } else {
-        final confirmations = result['confirmations'] ?? 0;
-        final required = result['required_confirmations'] ?? 64;
-        Get.snackbar(
-          'Payment is confirming',
-          response.data['message']?.toString() ??
-              'Confirmations: $confirmations/$required. Verify again shortly.',
-          snackPosition: SnackPosition.BOTTOM,
-          backgroundColor: AppColors.primary,
-          colorText: Colors.white,
-          duration: const Duration(seconds: 6),
-        );
+        try {
+          await updateCachedUser(user.copyWith(coins: balance));
+        } catch (error) {
+          result['balance_cache_warning'] = true;
+          debugPrint(
+            'Unable to persist the verified crypto balance locally: $error',
+          );
+        }
       }
       return result;
     } catch (e) {
       debugPrint('Crypto payment verification failed: $e');
-      Get.snackbar(
-        'Payment verification failed',
-        e.toString().replaceFirst('Bad state: ', ''),
-        snackPosition: SnackPosition.BOTTOM,
-        backgroundColor: AppColors.error,
-        colorText: Colors.white,
-      );
       rethrow;
     } finally {
       isLoading.value = false;

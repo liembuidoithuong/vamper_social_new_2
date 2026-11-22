@@ -1016,9 +1016,22 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         : '$expiresInMinutes minutes';
     final transactionHashController = TextEditingController();
     var isVerifying = false;
+    var paymentCompleted = false;
+    var verificationMessageIsError = false;
+    String? verificationMessage;
     Get.dialog(
       StatefulBuilder(
         builder: (dialogContext, setDialogState) {
+          final verificationColor = paymentCompleted
+              ? AppColors.success
+              : verificationMessageIsError
+              ? AppColors.error
+              : AppColors.primary;
+          final verificationIcon = paymentCompleted
+              ? Icons.check_circle_rounded
+              : verificationMessageIsError
+              ? Icons.error_outline_rounded
+              : Icons.hourglass_top_rounded;
           return AlertDialog(
             backgroundColor: Colors.white,
             surfaceTintColor: Colors.transparent,
@@ -1331,7 +1344,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                   const SizedBox(height: 16),
                   TextField(
                     controller: transactionHashController,
-                    enabled: !isVerifying,
+                    enabled: !isVerifying && !paymentCompleted,
                     decoration: InputDecoration(
                       labelText: isSolana
                           ? 'Solana transaction signature'
@@ -1369,6 +1382,43 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                       color: AppColors.textSecondary,
                     ),
                   ),
+                  if (verificationMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: verificationColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: verificationColor.withValues(alpha: 0.25),
+                        ),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            verificationIcon,
+                            size: 19,
+                            color: verificationColor,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              verificationMessage!,
+                              style: TextStyle(
+                                fontSize: 12,
+                                height: 1.4,
+                                color: verificationColor,
+                                fontWeight: paymentCompleted
+                                    ? FontWeight.w700
+                                    : FontWeight.normal,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   if (isVerifying) ...[
                     const SizedBox(height: 12),
                     Container(
@@ -1424,6 +1474,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                 onPressed: isVerifying
                     ? null
                     : () async {
+                        if (paymentCompleted) {
+                          Get.back();
+                          return;
+                        }
                         final transactionHash = transactionHashController.text
                             .trim();
                         final isValidSignature = isSolana
@@ -1434,14 +1488,18 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                 r'^0x[a-fA-F0-9]{64}$',
                               ).hasMatch(transactionHash);
                         if (!isValidSignature) {
-                          Get.snackbar(
-                            'Invalid transaction signature',
-                            'Paste the full transaction signature from your wallet.',
-                            snackPosition: SnackPosition.BOTTOM,
-                          );
+                          setDialogState(() {
+                            verificationMessageIsError = true;
+                            verificationMessage =
+                                'Enter the full transaction signature from your wallet.';
+                          });
                           return;
                         }
-                        setDialogState(() => isVerifying = true);
+                        setDialogState(() {
+                          isVerifying = true;
+                          verificationMessage = null;
+                          verificationMessageIsError = false;
+                        });
                         try {
                           final result = await authController
                               .verifyCryptoPayment(
@@ -1450,15 +1508,60 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                 isSolana: isSolana,
                               );
                           if (!dialogContext.mounted) return;
-                          if (result['status'] == 'completed') {
-                            Get.back();
+                          final status = result['status']?.toString();
+                          if (status == 'completed') {
+                            final balance = result['balance']?.toString();
+                            final alreadyProcessed =
+                                result['already_processed'] == true;
+                            setDialogState(() {
+                              isVerifying = false;
+                              paymentCompleted = true;
+                              verificationMessageIsError = false;
+                              verificationMessage =
+                                  result['balance_cache_warning'] == true
+                                  ? 'Payment verified and credited. The balance is $balance coins, but the app could not save it locally. Reopen the wallet to refresh.'
+                                  : alreadyProcessed
+                                  ? 'This payment was already processed. Your balance is $balance coins.'
+                                  : 'Payment verified! $coins coins were added. Your balance is now $balance.';
+                            });
+                          } else if (status == 'pending' ||
+                              status == 'confirming') {
+                            final confirmations =
+                                result['confirmations']?.toString();
+                            final requiredConfirmations =
+                                result['required_confirmations']?.toString();
+                            setDialogState(() {
+                              isVerifying = false;
+                              verificationMessageIsError = false;
+                              verificationMessage =
+                                  result['message']?.toString() ??
+                                  (confirmations != null &&
+                                          requiredConfirmations != null
+                                      ? 'Payment is still confirming ($confirmations/$requiredConfirmations). Keep this signature and try again shortly.'
+                                      : 'The network has not finalized this transaction yet. Keep this signature and try again shortly.');
+                            });
                           } else {
-                            setDialogState(() => isVerifying = false);
+                            setDialogState(() {
+                              isVerifying = false;
+                              verificationMessageIsError = true;
+                              verificationMessage =
+                                  'The server returned an unexpected payment status. You can retry verification with this signature.';
+                            });
                           }
                         } catch (error) {
                           debugPrint(
                             'Crypto payment verification UI failed: $error',
                           );
+                          if (dialogContext.mounted) {
+                            setDialogState(() {
+                              verificationMessageIsError = true;
+                              final message = error
+                                  .toString()
+                                  .replaceFirst('Bad state: ', '');
+                              verificationMessage =
+                                  '$message\nIf you retry, use the same signature; do not send the payment again.';
+                            });
+                          }
                         } finally {
                           if (dialogContext.mounted && isVerifying) {
                             setDialogState(() => isVerifying = false);
@@ -1492,7 +1595,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           Icon(Icons.verified_rounded, size: 18),
                           SizedBox(width: 7),
                           Text(
-                            'Verify payment',
+                            paymentCompleted ? 'Done' : 'Verify payment',
                             style: TextStyle(fontWeight: FontWeight.bold),
                           ),
                         ],

@@ -6,6 +6,7 @@ import 'package:get/get.dart';
 import '../../app/theme/app_colors.dart';
 import '../../controllers/auth_controller.dart';
 import '../../core/constants/api_constants.dart';
+import '../../core/utils/date_formatter.dart';
 import '../../widgets/vpc_coin_icon.dart';
 import 'store_screen.dart';
 
@@ -111,12 +112,14 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         final order = Map<String, dynamic>.from(rawOrder);
         final method = order['payment_method']?.toString();
         final asset = order['asset']?.toString();
+        final status = order['status']?.toString();
         final isValidMethod =
             (method == 'polygon_usdc' && asset == 'USDC') ||
             (method == 'solana_sol' && asset == 'SOL') ||
             (method == 'solana_usdc' && asset == 'USDC') ||
             (method == 'solana_usdt' && asset == 'USDT');
         if (!isValidMethod ||
+            !['pending', 'expired', 'completed'].contains(status) ||
             order['checkout_id'] == null ||
             int.tryParse(order['coins']?.toString() ?? '') == null ||
             order['amount'] == null ||
@@ -296,7 +299,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'My top-ups',
+                                  'Top-up history',
                                   style: TextStyle(
                                     color: AppColors.textPrimary,
                                     fontSize: 19,
@@ -305,7 +308,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                 ),
                                 SizedBox(height: 3),
                                 Text(
-                                  'Resume or verify an existing checkout',
+                                  'Recent payments and open checkouts',
                                   style: TextStyle(
                                     color: AppColors.textSecondary,
                                     fontSize: 12,
@@ -456,19 +459,23 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                   return _buildOpenOrderTile(
                                     order,
                                     isDeleting:
+                                        order['status'] != 'completed' &&
                                         _deletingCryptoOrderId ==
                                         order['checkout_id']?.toString(),
-                                    onDelete: () =>
-                                        _confirmAndDeleteCryptoOrder(
-                                          sheetContext,
-                                          authController,
-                                          order,
-                                          setSheetState,
-                                        ),
-                                    onTap: () => Navigator.pop(
-                                      sheetContext,
-                                      order,
-                                    ),
+                                    onDelete: order['status'] == 'completed'
+                                        ? () {}
+                                        : () => _confirmAndDeleteCryptoOrder(
+                                            sheetContext,
+                                            authController,
+                                            order,
+                                            setSheetState,
+                                          ),
+                                    onTap: order['status'] == 'completed'
+                                        ? null
+                                        : () => Navigator.pop(
+                                            sheetContext,
+                                            order,
+                                          ),
                                   );
                                 },
                               ),
@@ -537,7 +544,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
             ),
             SizedBox(height: 12),
             Text(
-              'No open top-ups',
+              'No top-ups yet',
               style: TextStyle(
                 color: AppColors.textPrimary,
                 fontWeight: FontWeight.w700,
@@ -546,7 +553,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
             ),
             SizedBox(height: 5),
             Text(
-              'Any checkout you start will appear here.',
+              'Your completed and open top-ups will appear here.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: AppColors.textSecondary,
@@ -561,15 +568,32 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
 
   Widget _buildOpenOrderTile(
     Map<String, dynamic> order, {
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
     required VoidCallback onDelete,
     required bool isDeleting,
   }) {
-    final expired = order['is_expired'] == true;
+    final completed = order['status'] == 'completed';
+    final expired = !completed && order['is_expired'] == true;
     final coins = order['coins'];
     final asset = order['asset'];
     final amount = order['amount'];
     final network = order['network'];
+    final completedAtEpoch = int.tryParse(
+      order['completed_at_epoch']?.toString() ?? '',
+    );
+    final completedAt = completedAtEpoch == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(completedAtEpoch * 1000);
+    final statusColor = expired
+        ? AppColors.error
+        : completed
+        ? AppColors.success
+        : AppColors.primary;
+    final statusIcon = completed
+        ? Icons.check_circle_outline_rounded
+        : expired
+        ? Icons.history_rounded
+        : Icons.account_balance_wallet_outlined;
     final expiresInMinutes =
         int.tryParse(order['expires_in_minutes']?.toString() ?? '') ?? 0;
     final expiresLabel = expiresInMinutes >= 60
@@ -577,6 +601,19 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
               ? '${expiresInMinutes ~/ 60}h'
               : '${expiresInMinutes ~/ 60}h ${expiresInMinutes % 60}m'
         : '$expiresInMinutes min';
+    final creditedTimeLabel = completedAt == null
+        ? ''
+        : ' ${DateFormatter.formatTimeAgo(completedAt)}';
+    final statusLabel = completed
+        ? '$network · Credited$creditedTimeLabel'
+        : expired
+        ? '$network · Expired — verify only if already paid'
+        : '$network · Expires in $expiresLabel';
+    final statusTextColor = completed
+        ? AppColors.success
+        : expired
+        ? AppColors.error
+        : AppColors.textSecondary;
 
     return Material(
       color: Colors.white,
@@ -589,8 +626,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
-              color: (expired ? AppColors.error : AppColors.primary)
-                  .withValues(alpha: 0.16),
+              color: statusColor.withValues(alpha: 0.16),
             ),
           ),
           child: Row(
@@ -599,17 +635,10 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: (expired ? AppColors.error : AppColors.primary)
-                      .withValues(alpha: 0.09),
+                  color: statusColor.withValues(alpha: 0.09),
                   shape: BoxShape.circle,
                 ),
-                child: Icon(
-                  expired
-                      ? Icons.history_rounded
-                      : Icons.account_balance_wallet_outlined,
-                  size: 20,
-                  color: expired ? AppColors.error : AppColors.primary,
-                ),
+                child: Icon(statusIcon, size: 20, color: statusColor),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -626,13 +655,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      expired
-                          ? '$network · Expired — verify only if already paid'
-                          : '$network · Expires in $expiresLabel',
+                      statusLabel,
                       style: TextStyle(
-                        color: expired
-                            ? AppColors.error
-                            : AppColors.textSecondary,
+                        color: statusTextColor,
                         fontSize: 11,
                         height: 1.3,
                       ),
@@ -643,27 +668,33 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  IconButton(
-                    tooltip: 'Remove checkout',
-                    visualDensity: VisualDensity.compact,
-                    onPressed: isDeleting ? null : onDelete,
-                    icon: isDeleting
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(
-                            Icons.close_rounded,
-                            color: AppColors.error,
-                            size: 19,
-                          ),
-                  ),
-                  const SizedBox(width: 2),
+                  if (!completed) ...[
+                    IconButton(
+                      tooltip: 'Remove checkout',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: isDeleting ? null : onDelete,
+                      icon: isDeleting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(
+                              Icons.close_rounded,
+                              color: AppColors.error,
+                              size: 19,
+                            ),
+                    ),
+                    const SizedBox(width: 2),
+                  ],
                   Text(
-                    expired ? 'Verify' : 'Resume',
+                    completed ? 'Done' : expired ? 'Verify' : 'Resume',
                     style: TextStyle(
-                      color: expired ? AppColors.error : AppColors.primary,
+                      color: expired
+                          ? AppColors.error
+                          : completed
+                          ? AppColors.success
+                          : AppColors.primary,
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
                     ),
@@ -1765,6 +1796,14 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     );
   }
 
+  bool _isRetryableCryptoVerificationError(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('temporarily unavailable') ||
+        message.contains('could not connect') ||
+        message.contains('connection timeout') ||
+        message.contains('no internet connection');
+  }
+
   void _showCryptoPaymentDialog(
     AuthController authController, {
     required String checkoutId,
@@ -2349,12 +2388,63 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                           verificationMessageIsError = false;
                         });
                         try {
-                          final result = await authController
-                              .verifyCryptoPayment(
+                          late Map<String, dynamic> result;
+                          var automaticRetries = 0;
+                          final maxAutomaticRetries = isSolana ? 6 : 12;
+                          final retryDelay = Duration(
+                            seconds: isSolana ? 5 : 10,
+                          );
+
+                          while (true) {
+                            try {
+                              result = await authController.verifyCryptoPayment(
                                 checkoutId,
                                 transactionHash,
                                 isSolana: isSolana,
                               );
+                            } catch (error) {
+                              if (!_isRetryableCryptoVerificationError(error) ||
+                                  automaticRetries >= maxAutomaticRetries) {
+                                rethrow;
+                              }
+                              if (!dialogContext.mounted) return;
+                              automaticRetries++;
+                              setDialogState(() {
+                                verificationMessageIsError = false;
+                                verificationMessage =
+                                    'The network is temporarily unavailable. '
+                                    'Retrying verification '
+                                    '($automaticRetries/$maxAutomaticRetries). '
+                                    'Do not send the payment again.';
+                              });
+                              await Future.delayed(retryDelay);
+                              if (!dialogContext.mounted) return;
+                              continue;
+                            }
+
+                            if (!dialogContext.mounted) return;
+                            final status = result['status']?.toString();
+                            if (status != 'pending' && status != 'confirming') {
+                              break;
+                            }
+                            if (automaticRetries >= maxAutomaticRetries) {
+                              break;
+                            }
+                            automaticRetries++;
+                            setDialogState(() {
+                              verificationMessageIsError = false;
+                              final statusMessage =
+                                  result['message']?.toString() ??
+                                  'Payment is still confirming.';
+                              verificationMessage =
+                                  '$statusMessage Automatically checking again '
+                                  '($automaticRetries/$maxAutomaticRetries). '
+                                  'Do not send the payment again.';
+                            });
+                            await Future.delayed(retryDelay);
+                            if (!dialogContext.mounted) return;
+                          }
+
                           if (!dialogContext.mounted) return;
                           final status = result['status']?.toString();
                           if (status == 'completed') {
@@ -2387,6 +2477,12 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                           requiredConfirmations != null
                                       ? 'Payment is still confirming ($confirmations/$requiredConfirmations). Keep this signature and try again shortly.'
                                       : 'The network has not finalized this transaction yet. Keep this signature and try again shortly.');
+                              if (automaticRetries >= maxAutomaticRetries) {
+                                verificationMessage =
+                                    '$verificationMessage Automatic checks '
+                                    'have paused; you can verify again shortly '
+                                    'with the same signature.';
+                              }
                             });
                           } else {
                             setDialogState(() {

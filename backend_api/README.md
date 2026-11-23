@@ -153,19 +153,22 @@ checkout. Testnet assets have no real market value. Solana order amounts use a
 separate quote captured and locked when the order is created. Solana USDT is
 not enabled for new checkouts.
 
-The Coin Store also loads the user's open crypto checkouts so a dismissed
-payment dialog can be reopened with its original amount, network, token, and
-recipient. This lets users finish or verify existing orders instead of creating
-duplicates. Expired orders remain available for verification only; the payment
-must have been sent before the order's original expiry. The five-open-order
-per-user limit remains in place for each payment network as a safety measure.
-The recovery list is paginated as the user scrolls. Users can permanently
-remove pending or expired checkouts from the list; the API marks them
-cancelled and retains their records. Cancelled order amounts remain reserved
-until their original expiry so they cannot be reassigned to another checkout.
-Warn users not to remove an order after sending funds, because its checkout
-details are needed to verify and credit that payment. Recovery and removal
-apply to both Polygon PoS Mainnet and Amoy, and Solana Mainnet-beta and Devnet.
+The Coin Store's top-up history lists completed crypto payments alongside
+open checkouts. Completed payments are ordered by credited time, newest first;
+open checkouts can be reopened with their original amount, network, token, and
+recipient. After a signature is submitted, the app automatically rechecks
+pending confirmations and temporary RPC failures for a limited time; users
+must not resend the payment. Expired orders remain available for verification
+only; the payment must have been sent before the order's original expiry. The
+five-open-order per-user limit remains in place for each payment network as a
+safety measure.
+The list is paginated as the user scrolls. Users can remove pending or expired
+checkouts from the list; the API marks them cancelled and retains their records.
+Cancelled order amounts remain reserved until their original expiry so they
+cannot be reassigned to another checkout. Warn users not to remove an order
+after sending funds, because its checkout details are needed to verify and
+credit that payment. History and recovery apply to both Polygon PoS Mainnet and
+Amoy, and Solana Mainnet-beta and Devnet.
 
 ## Solana coin top-ups
 

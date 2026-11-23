@@ -25,6 +25,7 @@ try {
         "SELECT checkout_id, payment_method, coins, asset, amount, network_key,
                 chain_id, token_mint, recipient_address, status,
                 sol_price_micro_usd,
+                UNIX_TIMESTAMP(completed_at) AS completed_epoch,
                 UNIX_TIMESTAMP(expires_at) AS expires_epoch,
                 GREATEST(0, CEIL(TIMESTAMPDIFF(SECOND, NOW(), expires_at) / 60)) AS expires_in_minutes,
                 expires_at <= NOW() AS is_expired
@@ -32,23 +33,28 @@ try {
             SELECT checkout_id, 'polygon_usdc' AS payment_method, coins,
                    'USDC' AS asset, amount_usdc AS amount, 'polygon' AS network_key,
                    chain_id, token_contract AS token_mint, recipient_address,
-                   status, NULL AS sol_price_micro_usd, expires_at, created_at
+                   status, NULL AS sol_price_micro_usd, expires_at, created_at,
+                   completed_at, COALESCE(completed_at, created_at) AS activity_at,
+                   COALESCE(transaction_id, id) AS order_id
             FROM crypto_checkout_orders
             WHERE user_id = :polygon_user_id
               AND chain_id IN (137, 80002)
-              AND status IN ('pending', 'expired')
+              AND status IN ('pending', 'expired', 'completed')
             UNION ALL
             SELECT checkout_id, CONCAT('solana_', LOWER(asset)) AS payment_method,
                    coins, UPPER(asset) AS asset, amount_display AS amount,
                    network AS network_key, NULL AS chain_id, token_mint,
-                   recipient_address, status, sol_price_micro_usd, expires_at, created_at
+                   recipient_address, status, sol_price_micro_usd, expires_at,
+                   created_at, completed_at,
+                   COALESCE(completed_at, created_at) AS activity_at,
+                   COALESCE(transaction_id, id) AS order_id
             FROM solana_checkout_orders
             WHERE user_id = :solana_user_id
               AND network IN ('mainnet-beta', 'devnet')
               AND UPPER(asset) IN ('SOL', 'USDC', 'USDT')
-              AND status IN ('pending', 'expired')
+              AND status IN ('pending', 'expired', 'completed')
          ) AS open_orders
-         ORDER BY created_at DESC, checkout_id DESC
+         ORDER BY activity_at DESC, created_at DESC, order_id DESC, checkout_id DESC
          LIMIT :page_size OFFSET :page_offset"
     );
     $query->bindValue(':polygon_user_id', $userId, PDO::PARAM_INT);
@@ -109,11 +115,15 @@ try {
             'coins' => (int)$order['coins'],
             'asset' => $asset,
             'amount' => (string)$order['amount'],
+            'status' => (string)$order['status'],
             'network' => $network,
             'chain_id' => $order['chain_id'] === null ? null : (int)$order['chain_id'],
             'token_mint' => $order['token_mint'],
             'recipient_address' => $order['recipient_address'],
             'expires_at_epoch' => (int)$order['expires_epoch'],
+            'completed_at_epoch' => $order['completed_epoch'] === null
+                ? null
+                : (int)$order['completed_epoch'],
             'sol_price_usd' => $order['sol_price_micro_usd'] === null
                 ? null
                 : number_format((int)$order['sol_price_micro_usd'] / 1000000, 6, '.', ''),

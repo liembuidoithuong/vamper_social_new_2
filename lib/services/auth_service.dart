@@ -1,12 +1,32 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 import '../core/constants/api_constants.dart';
 import '../models/user_model.dart';
 import 'api_service.dart';
 
 class AuthService {
   final ApiService _apiService = ApiService();
+
+  Future<String> getDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final existingId = prefs.getString('device_installation_id');
+    if (existingId != null && existingId.isNotEmpty) return existingId;
+
+    final secureRandom = Random.secure();
+    final bytes = List<int>.generate(16, (_) => secureRandom.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    final hex = bytes
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+    final deviceId = '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+    await prefs.setString('device_installation_id', deviceId);
+    return deviceId;
+  }
 
   // Register
   Future<Map<String, dynamic>> register({
@@ -21,6 +41,7 @@ class AuthService {
           'full_name': fullName,
           'email': email.trim().toLowerCase(),
           'password': password,
+          'device_id': await getDeviceId(),
         },
       );
 
@@ -46,7 +67,11 @@ class AuthService {
     try {
       final response = await _apiService.post(
         ApiConstants.login,
-        data: {'email': email.trim().toLowerCase(), 'password': password},
+        data: {
+          'email': email.trim().toLowerCase(),
+          'password': password,
+          'device_id': await getDeviceId(),
+        },
       );
 
       if (response.data['success'] == true) {
@@ -119,7 +144,11 @@ class AuthService {
     try {
       final response = await _apiService.post(
         ApiConstants.verifyOtp,
-        data: {'email': email, 'otp_code': otpCode},
+        data: {
+          'email': email,
+          'otp_code': otpCode,
+          'device_id': await getDeviceId(),
+        },
       );
       if (response.data['success'] == true) {
         await saveAuthData(

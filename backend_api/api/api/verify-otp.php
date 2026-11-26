@@ -13,6 +13,7 @@ $db = $database->getConnection();
 
 // Get posted data
 $data = json_decode(file_get_contents("php://input"));
+$deviceId = normalizeDeviceId($data->device_id ?? null);
 
 // Normalize input: trim and lowercase email, trim OTP
 $email = isset($data->email) ? strtolower(trim((string)$data->email)) : '';
@@ -42,6 +43,8 @@ if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
 $otp_normalized = sprintf("%06d", (int)$otp_from_user);
 
 try {
+    assertDeviceNotBlocked($db, $deviceId);
+
     // Check for valid, unused, and non-expired OTP
     // We fetch the most recent unused OTP for this email
     $query = "SELECT id, otp_code, is_used, expires_at
@@ -127,7 +130,7 @@ try {
     if (!isset($user['is_verified']))    $user['is_verified'] = 1;
 
     // Generate token
-    $token = issueApiToken($db, (int)$user['id']);
+    $token = issueApiToken($db, (int)$user['id'], $deviceId);
 
     http_response_code(200);
     echo json_encode([
@@ -139,6 +142,9 @@ try {
         ]
     ]);
 
+} catch (DomainException $e) {
+    http_response_code(403);
+    echo json_encode(["success" => false, "message" => $e->getMessage()]);
 } catch (PDOException $e) {
     http_response_code(500);
     echo json_encode([

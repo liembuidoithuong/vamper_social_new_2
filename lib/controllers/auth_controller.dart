@@ -368,6 +368,7 @@ class AuthController extends GetxController {
           'full_name': targetName,
           'social_id':
               socialId ?? 'social_${DateTime.now().millisecondsSinceEpoch}',
+          'device_id': await _authService.getDeviceId(),
           'photo_url': ?photoUrl,
         },
       );
@@ -672,6 +673,19 @@ class AuthController extends GetxController {
     int coins, {
     required String paymentMethod,
   }) async {
+    if (paymentMethod.startsWith('cfg_')) {
+      final response = await apiService.post(
+        ApiConstants.createConfiguredCryptoOrder,
+        data: {'coins': coins, 'method_id': paymentMethod},
+      );
+      if (response.data['success'] != true) {
+        throw StateError(
+          response.data['message']?.toString() ??
+              'Unable to start a crypto payment.',
+        );
+      }
+      return Map<String, dynamic>.from(response.data['data'] as Map);
+    }
     final asset = switch (paymentMethod) {
       'solana_sol' => 'SOL',
       'solana_usdc' => 'USDC',
@@ -699,6 +713,7 @@ class AuthController extends GetxController {
     String checkoutId,
     String transactionHash, {
     bool isSolana = false,
+    bool isConfiguredCrypto = false,
   }) async {
     final user = currentUser.value;
     if (user == null) {
@@ -708,10 +723,17 @@ class AuthController extends GetxController {
     try {
       isLoading.value = true;
       final response = await apiService.post(
-        isSolana
+        isConfiguredCrypto
+            ? ApiConstants.verifyConfiguredCryptoPayment
+            : isSolana
             ? ApiConstants.verifySolanaPayment
             : ApiConstants.verifyCryptoPayment,
-        data: isSolana
+        data: isConfiguredCrypto
+            ? {
+                'checkout_id': checkoutId,
+                'transaction_reference': transactionHash,
+              }
+            : isSolana
             ? {
                 'checkout_id': checkoutId,
                 'transaction_signature': transactionHash,

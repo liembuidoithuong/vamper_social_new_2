@@ -4,13 +4,14 @@ require_once '../config/database.php';
 require_once __DIR__ . '/libs/ApiAuth.php';
 require_once __DIR__ . '/libs/PolygonUsdcPayments.php';
 require_once __DIR__ . '/libs/SolanaPayments.php';
+require_once __DIR__ . '/libs/ConfiguredCryptoPayments.php';
 
 $database = new Database();
 $db = $database->getConnection();
 authenticateApiUser($db);
 $settings = polygonUsdcSettings($db);
 $solanaSettings = solanaPaymentSettings($db);
-$paymentMethods = [];
+$paymentMethods = configuredCryptoPublicMethods($db);
 if ($settings['enabled']) {
     $paymentMethods[] = [
         'id' => 'polygon_usdc',
@@ -19,6 +20,8 @@ if ($settings['enabled']) {
             : 'USDC - Polygon PoS',
         'network' => $settings['network'],
         'asset' => 'USDC',
+        'asset_type' => 'evm_token',
+        'decimals' => 6,
     ];
 }
 if ($solanaSettings['enabled']) {
@@ -29,6 +32,8 @@ if ($solanaSettings['enabled']) {
             : 'SOL - Solana',
         'network' => $solanaSettings['network'],
         'asset' => 'SOL',
+        'asset_type' => 'solana_native',
+        'decimals' => 9,
     ];
 }
 

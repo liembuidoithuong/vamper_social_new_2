@@ -9,6 +9,7 @@ $db = $database->getConnection();
 
 // Get posted data
 $data = json_decode(file_get_contents("php://input"));
+$deviceId = normalizeDeviceId($data->device_id ?? null);
 
 // Validate input
 if (empty($data->full_name) || empty($data->email) || empty($data->password)) {
@@ -49,6 +50,20 @@ try {
         exit();
     }
 
+    try {
+        beginDeviceAccountRegistration($db, $deviceId);
+    } catch (DomainException $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        http_response_code(429);
+        echo json_encode([
+            "success" => false,
+            "message" => $e->getMessage()
+        ]);
+        exit();
+    }
+
     // Insert new user with 10 free initial Vamper coins
     $query = "INSERT INTO users (full_name, email, password, coins, created_at)
               VALUES (:full_name, :email, :password, 10, NOW())";
@@ -65,6 +80,8 @@ try {
 
     if ($stmt->execute()) {
         $user_id = $db->lastInsertId();
+        linkUserToDevice($db, (int)$user_id, $deviceId);
+        $db->commit();
         
         // Get user data
         $query = "SELECT id, full_name, email, profile_photo, is_verified, created_at 
@@ -74,7 +91,7 @@ try {
         $stmt->execute();
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        $token = issueApiToken($db, (int)$user['id']);
+        $token = issueApiToken($db, (int)$user['id'], $deviceId);
 
         // ============================================
         // AUTO-SEND OTP AFTER REGISTRATION - VIA EMAIL SENDER CLASS
@@ -151,6 +168,9 @@ try {
             ]
         ]);
     } else {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
         http_response_code(500);
         echo json_encode([
             "success" => false,
@@ -158,7 +178,16 @@ try {
         ]);
     }
 
+} catch (DomainException $e) {
+    http_response_code(403);
+    echo json_encode([
+        "success" => false,
+        "message" => $e->getMessage()
+    ]);
 } catch (PDOException $e) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     http_response_code(500);
     echo json_encode([
         "success" => false,

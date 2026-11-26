@@ -13,6 +13,7 @@ $full_name = isset($data->full_name) ? trim((string)$data->full_name) : 'Vamper 
 $provider = isset($data->provider) ? trim((string)$data->provider) : 'google';
 $social_id = isset($data->social_id) ? trim((string)$data->social_id) : '';
 $photo_url = isset($data->photo_url) ? trim((string)$data->photo_url) : null;
+$deviceId = normalizeDeviceId($data->device_id ?? null);
 
 if (empty($email)) {
     http_response_code(400);
@@ -46,7 +47,7 @@ try {
         // User is only considered "new" if they haven't completed their gender/birthdate yet
         $is_new_user = empty($user['gender']);
 
-        $token = issueApiToken($db, (int)$user['id']);
+        $token = issueApiToken($db, (int)$user['id'], $deviceId);
 
         http_response_code(200);
         echo json_encode([
@@ -61,6 +62,17 @@ try {
 
     } else {
         // User does not exist -> Auto-Register brand NEW social user
+        try {
+            beginDeviceAccountRegistration($db, $deviceId);
+        } catch (DomainException $e) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            http_response_code(429);
+            echo json_encode(["success" => false, "message" => $e->getMessage()]);
+            exit();
+        }
+
         $randomPass = password_hash(uniqid($provider . '_', true), PASSWORD_DEFAULT);
 
         $ins = $db->prepare("INSERT INTO users (full_name, email, password, role, profile_photo, coins, is_active, is_verified, created_at)
@@ -73,12 +85,14 @@ try {
         ]);
 
         $new_id = $db->lastInsertId();
+        linkUserToDevice($db, (int)$new_id, $deviceId);
+        $db->commit();
 
         $stmt_user = $db->prepare("SELECT id, full_name, email, role, gender, profile_photo, coins, is_active, is_verified, created_at FROM users WHERE id = :id LIMIT 1");
         $stmt_user->execute([':id' => $new_id]);
         $newUser = $stmt_user->fetch(PDO::FETCH_ASSOC);
 
-        $token = issueApiToken($db, (int)$new_id);
+        $token = issueApiToken($db, (int)$new_id, $deviceId);
 
         http_response_code(200);
         echo json_encode([
@@ -92,7 +106,13 @@ try {
         ]);
     }
 
+} catch (DomainException $e) {
+    http_response_code(403);
+    echo json_encode(["success" => false, "message" => $e->getMessage()]);
 } catch (PDOException $e) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     http_response_code(500);
     echo json_encode(["success" => false, "message" => "Database error: " . $e->getMessage()]);
 }

@@ -4,6 +4,7 @@ require_once '../config/database.php';
 require_once __DIR__ . '/libs/ApiAuth.php';
 require_once __DIR__ . '/libs/PolygonUsdcPayments.php';
 require_once __DIR__ . '/libs/SolanaPayments.php';
+require_once __DIR__ . '/libs/ConfiguredCryptoPayments.php';
 
 $database = new Database();
 $db = $database->getConnection();
@@ -20,6 +21,7 @@ if (!preg_match('/^[a-f0-9-]{36}$/iD', $checkoutId)) {
 try {
     ensurePolygonUsdcPaymentSchema($db);
     ensureSolanaPaymentSchema($db);
+    ensureConfiguredCryptoSchema($db);
     $db->beginTransaction();
 
     $orders = [
@@ -30,6 +32,10 @@ try {
         [
             'table' => 'solana_checkout_orders',
             'reference' => 'transaction_signature',
+        ],
+        [
+            'table' => 'configured_crypto_checkout_orders',
+            'reference' => 'transaction_reference',
         ],
     ];
     foreach ($orders as $order) {

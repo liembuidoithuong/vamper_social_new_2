@@ -64,6 +64,10 @@ class ApiConstants {
       '$baseUrl/delete-open-crypto-order.php';
   static String get createCryptoOrder => '$baseUrl/create-crypto-order.php';
   static String get verifyCryptoPayment => '$baseUrl/verify-crypto-payment.php';
+  static String get createConfiguredCryptoOrder =>
+      '$baseUrl/create-configured-crypto-order.php';
+  static String get verifyConfiguredCryptoPayment =>
+      '$baseUrl/verify-configured-crypto-payment.php';
   static String get createSolanaOrder => '$baseUrl/create-solana-order.php';
   static String get verifySolanaPayment => '$baseUrl/verify-solana-payment.php';
   static String get createPayPalOrder => '$baseUrl/create-paypal-order.php';

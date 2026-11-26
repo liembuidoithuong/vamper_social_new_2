@@ -52,7 +52,23 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
   }
 
   bool get _isSelectedTestnet =>
+      _selectedMethod?['is_testnet'] == true ||
       (_selectedMethod?['network']?.toString() ?? '').contains('testnet');
+
+  Map<String, dynamic>? _findPaymentMethod(String paymentMethod) {
+    for (final method in _paymentMethods) {
+      if (method['id'] == paymentMethod) return method;
+    }
+    return null;
+  }
+
+  bool _isSolanaMethod(String paymentMethod, {String? assetType}) {
+    final selectedType = _findPaymentMethod(paymentMethod)?['asset_type']
+        ?.toString();
+    return paymentMethod.startsWith('solana_') ||
+        assetType?.startsWith('solana_') == true ||
+        selectedType?.startsWith('solana_') == true;
+  }
 
   @override
   void initState() {
@@ -117,7 +133,16 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
             (method == 'polygon_usdc' && asset == 'USDC') ||
             (method == 'solana_sol' && asset == 'SOL') ||
             (method == 'solana_usdc' && asset == 'USDC') ||
-            (method == 'solana_usdt' && asset == 'USDT');
+            (method == 'solana_usdt' && asset == 'USDT') ||
+            (method?.startsWith('cfg_') == true &&
+                RegExp(r'^[A-Z0-9]{2,20}$').hasMatch(asset ?? '') &&
+                [
+                  'evm_native',
+                  'evm_token',
+                  'solana_native',
+                  'solana_spl',
+                ].contains(order['asset_type']) &&
+                int.tryParse(order['decimals']?.toString() ?? '') != null);
         if (!isValidMethod ||
             !['pending', 'expired', 'completed'].contains(status) ||
             order['checkout_id'] == null ||
@@ -830,6 +855,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
           final id = method['id']?.toString();
           final methodNetwork = method['network']?.toString();
           final asset = method['asset']?.toString();
+          final assetType = method['asset_type']?.toString();
           final isValidPolygon =
               id == 'polygon_usdc' &&
               asset == 'USDC' &&
@@ -843,7 +869,28 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
           final validSolanaNetwork =
               methodNetwork == 'Solana Mainnet' ||
               methodNetwork == 'Solana Devnet (testnet)';
-          if (!isValidPolygon && !(isValidSolana && validSolanaNetwork)) {
+          final chainId = int.tryParse(method['chain_id']?.toString() ?? '');
+          final decimals = int.tryParse(method['decimals']?.toString() ?? '');
+          final validConfiguredMethod =
+              id?.startsWith('cfg_') == true &&
+              RegExp(r'^[A-Z0-9]{2,20}$').hasMatch(asset ?? '') &&
+              [
+                'evm_native',
+                'evm_token',
+                'solana_native',
+                'solana_spl',
+              ].contains(assetType) &&
+              methodNetwork != null &&
+              methodNetwork.isNotEmpty &&
+              decimals != null &&
+              decimals >= 0 &&
+              decimals <= 18 &&
+              (assetType?.startsWith('evm_') == true
+                  ? chainId != null && chainId > 0
+                  : chainId == null);
+          if (!isValidPolygon &&
+              !(isValidSolana && validSolanaNetwork) &&
+              !validConfiguredMethod) {
             throw StateError(
               'The server returned an unsupported crypto payment method.',
             );
@@ -1616,10 +1663,21 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
       final network = order['network']?.toString();
       final recipient = order['recipient_address']?.toString();
       final asset = (order['asset'] ?? order['currency'])?.toString();
+      final assetType = order['asset_type']?.toString();
       final tokenMint = (order['token_mint'] ?? order['token_contract'])
           ?.toString();
-      final isSolana = paymentMethod.startsWith('solana_');
+      final decimals =
+          int.tryParse(order['decimals']?.toString() ?? '') ??
+          (asset == 'SOL' ? 9 : 6);
+      final validDecimals = decimals >= 0 && decimals <= 18;
+      final amountDecimals = validDecimals ? decimals : 0;
+      final isSolana = _isSolanaMethod(
+        paymentMethod,
+        assetType: assetType,
+      );
+      final configuredMethod = _findPaymentMethod(paymentMethod);
       final isTestnet =
+          order['is_testnet'] == true ||
           network?.contains('testnet') == true ||
           network == 'Polygon PoS Amoy (testnet)';
       final chainId = int.tryParse(order['chain_id']?.toString() ?? '');
@@ -1646,11 +1704,37 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
               network == 'Solana Devnet (testnet)') &&
           (tokenMint == null ||
               RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(tokenMint));
+      final isConfiguredMethod = paymentMethod.startsWith('cfg_');
+      final validConfiguredMethod =
+          isConfiguredMethod &&
+          configuredMethod != null &&
+          order['method_id'] == paymentMethod &&
+          assetType == configuredMethod['asset_type'] &&
+          asset == configuredMethod['asset'] &&
+          RegExp(r'^[A-Z0-9]{2,20}$').hasMatch(asset ?? '') &&
+          network == configuredMethod['network'] &&
+          isTestnet == (configuredMethod['is_testnet'] == true) &&
+          validDecimals &&
+          (assetType?.startsWith('evm_') == true
+              ? chainId != null &&
+                  chainId > 0 &&
+                  chainId ==
+                      int.tryParse(
+                        configuredMethod['chain_id']?.toString() ?? '',
+                      )
+              : chainId == null) &&
+          (assetType == 'evm_token' || assetType == 'solana_spl'
+              ? tokenMint != null &&
+                  (assetType == 'evm_token'
+                      ? RegExp(r'^0x[a-fA-F0-9]{40}$').hasMatch(tokenMint)
+                      : RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+                          .hasMatch(tokenMint))
+              : tokenMint == null);
+      final amountPattern = amountDecimals == 0
+          ? RegExp(r'^\d+$')
+          : RegExp('^\\d+\\.\\d{1,$amountDecimals}\$');
       final validAmount =
-          amount != null &&
-          RegExp(
-            asset == 'SOL' ? r'^\d+\.\d{9}$' : r'^\d+\.\d{1,6}$',
-          ).hasMatch(amount);
+          validDecimals && amount != null && amountPattern.hasMatch(amount);
       final validRecipient =
           recipient != null &&
           (isSolana
@@ -1661,9 +1745,13 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
           network == null ||
           asset == null ||
           !validRecipient ||
-          !(isPolygonMainnet || isPolygonAmoy || validSolanaMethod) ||
+          !(isPolygonMainnet ||
+              isPolygonAmoy ||
+              validSolanaMethod ||
+              validConfiguredMethod) ||
           (paymentMethod == 'solana_sol' && tokenMint != null) ||
-          (paymentMethod != 'solana_sol' && isSolana && tokenMint == null)) {
+          (['solana_usdc', 'solana_usdt'].contains(paymentMethod) &&
+              tokenMint == null)) {
         throw StateError('The server returned invalid crypto payment details.');
       }
 
@@ -1685,6 +1773,7 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
         expiresInMinutes: expiresInMinutes,
         isTestnet: isTestnet,
         recipient: recipient,
+        assetType: assetType,
       );
     } catch (error) {
       if (mounted) {
@@ -1713,9 +1802,17 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     final network = order['network']?.toString();
     final recipient = order['recipient_address']?.toString();
     final tokenMint = order['token_mint']?.toString();
+    final assetType = order['asset_type']?.toString();
     final coins = int.tryParse(order['coins']?.toString() ?? '');
     final chainId = int.tryParse(order['chain_id']?.toString() ?? '');
-    final isSolana = paymentMethod?.startsWith('solana_') == true;
+    final decimals =
+        int.tryParse(order['decimals']?.toString() ?? '') ??
+        (asset == 'SOL' ? 9 : 6);
+    final validDecimals = decimals >= 0 && decimals <= 18;
+    final amountDecimals = validDecimals ? decimals : 0;
+    final isSolana =
+        paymentMethod?.startsWith('solana_') == true ||
+        assetType?.startsWith('solana_') == true;
     final orderMarkedExpired = order['is_expired'] == true;
     final isPolygonMainnet =
         paymentMethod == 'polygon_usdc' &&
@@ -1742,11 +1839,31 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
             ? tokenMint == null || tokenMint.isEmpty
             : tokenMint != null &&
                 RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$').hasMatch(tokenMint));
+    final validConfiguredMethod =
+        paymentMethod?.startsWith('cfg_') == true &&
+        RegExp(r'^[A-Z0-9]{2,20}$').hasMatch(asset ?? '') &&
+        [
+          'evm_native',
+          'evm_token',
+          'solana_native',
+          'solana_spl',
+        ].contains(assetType) &&
+        validDecimals &&
+        (assetType?.startsWith('evm_') == true
+            ? chainId != null && chainId > 0
+            : chainId == null) &&
+        (assetType == 'evm_token' || assetType == 'solana_spl'
+            ? tokenMint != null &&
+                (assetType == 'evm_token'
+                    ? RegExp(r'^0x[a-fA-F0-9]{40}$').hasMatch(tokenMint)
+                    : RegExp(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
+                        .hasMatch(tokenMint))
+            : tokenMint == null);
+    final amountPattern = amountDecimals == 0
+        ? RegExp(r'^\d+$')
+        : RegExp('^\\d+\\.\\d{1,$amountDecimals}\$');
     final validAmount =
-        amount != null &&
-        RegExp(asset == 'SOL' ? r'^\d+\.\d{9}$' : r'^\d+\.\d{1,6}$').hasMatch(
-          amount,
-        );
+        validDecimals && amount != null && amountPattern.hasMatch(amount);
     final validRecipient =
         recipient != null &&
         (isSolana
@@ -1755,9 +1872,14 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
 
     if (checkoutId == null ||
         coins == null ||
+        asset == null ||
+        network == null ||
         !validAmount ||
         !validRecipient ||
-        !(isPolygonMainnet || isPolygonAmoy || isValidSolana)) {
+        !(isPolygonMainnet ||
+            isPolygonAmoy ||
+            isValidSolana ||
+            validConfiguredMethod)) {
       Get.snackbar(
         'Unable to reopen checkout',
         'The saved checkout details are invalid. Do not send funds to this order.',
@@ -1787,12 +1909,14 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
       paymentMethod: paymentMethod!,
       expiresInMinutes: expiresInMinutes,
       isTestnet:
+          order['is_testnet'] == true ||
           network!.contains('testnet') ||
           network == 'Polygon PoS Amoy (testnet)',
       isExpired: isExpired,
       expiresAtEpoch: expiresAtEpoch,
       isResumed: true,
       recipient: recipient,
+      assetType: assetType,
     );
   }
 
@@ -1820,8 +1944,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
     bool isResumed = false,
     String? tokenMint,
     String? solPriceUsd,
+    String? assetType,
   }) {
-    final isSolana = paymentMethod.startsWith('solana_');
+    final isSolana = _isSolanaMethod(paymentMethod, assetType: assetType);
     final transactionHashController = TextEditingController();
     Timer? expiryTimer;
     var isVerifying = false;
@@ -2401,6 +2526,9 @@ class _CoinShopScreenState extends State<CoinShopScreen> {
                                 checkoutId,
                                 transactionHash,
                                 isSolana: isSolana,
+                                isConfiguredCrypto: paymentMethod.startsWith(
+                                  'cfg_',
+                                ),
                               );
                             } catch (error) {
                               if (!_isRetryableCryptoVerificationError(error) ||

@@ -3,6 +3,7 @@ require_once '../config/cors.php';
 require_once '../config/database.php';
 require_once __DIR__ . '/libs/ApiAuth.php';
 require_once __DIR__ . '/libs/SolanaPayments.php';
+require_once __DIR__ . '/libs/ConfiguredCryptoPayments.php';
 
 $database = new Database();
 $db = $database->getConnection();
@@ -19,6 +20,7 @@ if (!preg_match('/^[a-f0-9-]{36}$/iD', $checkoutId) || !solanaValidateSignature(
 
 try {
     ensureSolanaPaymentSchema($db);
+    ensureConfiguredCryptoReferenceSchema($db);
     $query = $db->prepare(
         'SELECT *, UNIX_TIMESTAMP(created_at) AS created_epoch,
                 UNIX_TIMESTAMP(expires_at) AS expires_epoch
@@ -167,6 +169,12 @@ try {
     if ($usedSignatureQuery->fetchColumn() !== false) {
         throw new DomainException('This Solana transaction has already been used for a coin top-up.');
     }
+    configuredCryptoReservePaymentReference(
+        $db,
+        'solana:' . (string)$settings['genesis_hash'],
+        $signature,
+        $checkoutId
+    );
 
     $balanceQuery = $db->prepare('SELECT coins FROM users WHERE id = :id AND is_active = 1 FOR UPDATE');
     $balanceQuery->execute([':id' => $userId]);
@@ -232,6 +240,22 @@ try {
     if ($db->inTransaction()) $db->rollBack();
     http_response_code(409);
     echo json_encode(['success' => false, 'message' => $error->getMessage()]);
+} catch (PDOException $error) {
+    if ($db->inTransaction()) $db->rollBack();
+    if (($error->errorInfo[0] ?? null) === '23000') {
+        http_response_code(409);
+        echo json_encode([
+            'success' => false,
+            'message' => 'This Solana transaction has already been used for a coin top-up.',
+        ]);
+        exit;
+    }
+    error_log('Solana payment database write failed: ' . $error->getMessage());
+    http_response_code(503);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Payment verification could not be saved. Please retry.',
+    ]);
 } catch (Throwable $error) {
     if ($db->inTransaction()) $db->rollBack();
     error_log('Unable to verify Solana payment: ' . $error->getMessage());

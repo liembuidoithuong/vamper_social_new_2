@@ -2,6 +2,8 @@
 require_once __DIR__ . '/libs/AdminTools.php';
 require_once __DIR__ . '/api/libs/PolygonUsdcPayments.php';
 require_once __DIR__ . '/api/libs/SolanaPayments.php';
+require_once __DIR__ . '/api/libs/ConfiguredCryptoPayments.php';
+require_once __DIR__ . '/api/libs/DeviceSecurity.php';
 require_once __DIR__ . '/api/libs/LiveKit.php';
 
 function adminQueryString(string $key, string $default = ''): string
@@ -156,6 +158,9 @@ $txDateTo = adminQueryString('tx_to');
 $partySearch = trim(adminQueryString('party_search'));
 $partyPage = min(100000, max(1, intval(adminQueryString('party_page', '1'))));
 $partyLimit = 20;
+$deviceSearch = trim(adminQueryString('device_search'));
+$devicePage = min(100000, max(1, intval(adminQueryString('device_page', '1'))));
+$deviceLimit = 25;
 
 $error = '';
 $success = '';
@@ -227,6 +232,8 @@ if ($isAdminLoggedIn) {
 
 if ($isAdminLoggedIn) {
     ensurePartyManagementSchema($db);
+    ensureConfiguredCryptoSchema($db);
+    ensureDeviceSecuritySchema($db);
     $db->exec("CREATE TABLE IF NOT EXISTS settings (
         `key` VARCHAR(255) PRIMARY KEY,
         `value` TEXT NOT NULL
@@ -238,7 +245,9 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $postAction = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
     $requiredPermission = match ($postAction) {
         'set_user_status', 'create_user', 'edit_user', 'delete_user' => 'users',
-        'adjust_coins', 'save_polygon_payment_settings', 'save_solana_payment_settings' => 'finance',
+        'save_device_policy', 'set_device_status' => 'devices',
+        'adjust_coins', 'save_polygon_payment_settings', 'save_solana_payment_settings',
+        'save_configured_crypto_method' => 'finance',
         'create_party', 'save_party', 'set_party_status', 'delete_party' => 'parties',
         'set_post_status', 'delete_post', 'review_report', 'delete_report' => 'reports',
         'create_shop_item', 'save_shop_item', 'toggle_shop_item', 'delete_shop_item' => 'shop',
@@ -415,6 +424,93 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($db->inTransaction()) $db->rollBack();
                 error_log('Admin party deletion failed: ' . $exception->getMessage());
                 $error = 'Không thể xóa phòng Party.';
+            }
+        }
+    } elseif ($postAction === 'save_device_policy') {
+        $enabled = filter_var($_POST['enforcement_enabled'] ?? null, FILTER_VALIDATE_INT);
+        $maxAccounts = filter_var($_POST['max_accounts'] ?? null, FILTER_VALIDATE_INT);
+        if (!in_array($enabled, [0, 1], true) || $maxAccounts === false || $maxAccounts < 1 || $maxAccounts > 20) {
+            $error = 'Chọn trạng thái và giới hạn từ 1 đến 20 tài khoản trên mỗi thiết bị.';
+        } else {
+            try {
+                $db->beginTransaction();
+                $db->prepare(
+                    'INSERT INTO device_security_config (id, enforcement_enabled, max_accounts)
+                     VALUES (1, :enabled, :max_accounts)
+                     ON DUPLICATE KEY UPDATE enforcement_enabled = VALUES(enforcement_enabled),
+                                             max_accounts = VALUES(max_accounts)'
+                )->execute([':enabled' => $enabled, ':max_accounts' => $maxAccounts]);
+                writeAdminAudit(
+                    $db,
+                    (int)$_SESSION['admin_id'],
+                    'device_policy_updated',
+                    'device_policy',
+                    '1',
+                    ['enabled' => $enabled === 1, 'max_accounts' => $maxAccounts]
+                );
+                $db->commit();
+                $success = $enabled === 1
+                    ? "Đã bật giới hạn {$maxAccounts} tài khoản trên mỗi thiết bị."
+                    : 'Đã tắt giới hạn tạo tài khoản theo thiết bị.';
+            } catch (Throwable $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                error_log('Admin device policy update failed: ' . $exception->getMessage());
+                $error = 'Không thể lưu chính sách thiết bị.';
+            }
+        }
+    } elseif ($postAction === 'set_device_status') {
+        $deviceId = normalizeDeviceId($_POST['device_id'] ?? null);
+        $isBlocked = filter_var($_POST['is_blocked'] ?? null, FILTER_VALIDATE_INT);
+        $reason = trim($_POST['reason'] ?? '');
+        if ($deviceId === null || !in_array($isBlocked, [0, 1], true)
+            || ($isBlocked === 1 && ($reason === '' || strlen($reason) > 500))) {
+            $error = 'Thiết bị, trạng thái hoặc lý do khóa không hợp lệ.';
+        } else {
+            try {
+                $db->beginTransaction();
+                $deviceQuery = $db->prepare(
+                    'SELECT device_id FROM device_installations WHERE device_id = :device_id FOR UPDATE'
+                );
+                $deviceQuery->execute([':device_id' => $deviceId]);
+                if (!$deviceQuery->fetchColumn()) {
+                    throw new DomainException('Không tìm thấy thiết bị.');
+                }
+                $db->prepare(
+                    'UPDATE device_installations
+                     SET is_blocked = :is_blocked,
+                         block_reason = :reason,
+                         blocked_by = :actor,
+                         blocked_at = ' . ($isBlocked === 1 ? 'UTC_TIMESTAMP()' : 'NULL') . '
+                     WHERE device_id = :device_id'
+                )->execute([
+                    ':is_blocked' => $isBlocked,
+                    ':reason' => $isBlocked === 1 ? $reason : null,
+                    ':actor' => $isBlocked === 1 ? (int)$_SESSION['admin_id'] : null,
+                    ':device_id' => $deviceId,
+                ]);
+                if ($isBlocked === 1) {
+                    $db->prepare('DELETE FROM api_tokens WHERE device_id = :device_id')
+                        ->execute([':device_id' => $deviceId]);
+                }
+                writeAdminAudit(
+                    $db,
+                    (int)$_SESSION['admin_id'],
+                    $isBlocked === 1 ? 'device_blocked' : 'device_unblocked',
+                    'device',
+                    $deviceId,
+                    ['reason' => $isBlocked === 1 ? $reason : null]
+                );
+                $db->commit();
+                $success = $isBlocked === 1
+                    ? 'Đã khóa thiết bị và thu hồi các phiên đăng nhập gắn với thiết bị.'
+                    : 'Đã mở khóa thiết bị.';
+            } catch (DomainException $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                $error = $exception->getMessage();
+            } catch (Throwable $exception) {
+                if ($db->inTransaction()) $db->rollBack();
+                error_log('Admin device status update failed: ' . $exception->getMessage());
+                $error = 'Không thể cập nhật trạng thái thiết bị.';
             }
         }
     } elseif ($postAction === 'set_user_status') {
@@ -1006,6 +1102,116 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $success = 'Đã cập nhật quyền quản trị.';
             }
         }
+    } elseif ($postAction === 'save_configured_crypto_method') {
+        $method = [
+            'id' => trim((string)($_POST['id'] ?? '')),
+            'label' => trim((string)($_POST['label'] ?? '')),
+            'asset' => strtoupper(trim((string)($_POST['asset'] ?? ''))),
+            'asset_type' => trim((string)($_POST['asset_type'] ?? '')),
+            'network_key' => strtolower(trim((string)($_POST['network_key'] ?? ''))),
+            'network_name' => trim((string)($_POST['network_name'] ?? '')),
+            'is_testnet' => $_POST['is_testnet'] ?? '',
+            'chain_id' => trim((string)($_POST['chain_id'] ?? '')) ?: null,
+            'genesis_hash' => trim((string)($_POST['genesis_hash'] ?? '')) ?: null,
+            'rpc_url' => trim((string)($_POST['rpc_url'] ?? '')),
+            'recipient_address' => trim((string)($_POST['recipient_address'] ?? '')),
+            'token_address' => trim((string)($_POST['token_address'] ?? '')) ?: null,
+            'decimals' => filter_var($_POST['decimals'] ?? null, FILTER_VALIDATE_INT),
+            'pricing_mode' => trim((string)($_POST['pricing_mode'] ?? '')),
+            'market_coin_id' => strtolower(trim((string)($_POST['market_coin_id'] ?? ''))) ?: null,
+            'manual_price_usd' => trim((string)($_POST['manual_price_usd'] ?? '')) ?: null,
+            'min_confirmations' => filter_var($_POST['min_confirmations'] ?? null, FILTER_VALIDATE_INT),
+            'expires_minutes' => filter_var($_POST['expires_minutes'] ?? null, FILTER_VALIDATE_INT),
+            'enabled' => $_POST['enabled'] ?? '',
+        ];
+        try {
+            if (
+                !in_array($method['is_testnet'], ['0', '1', 0, 1], true)
+                || !in_array($method['enabled'], ['0', '1', 0, 1], true)
+                || $method['decimals'] === false
+                || $method['min_confirmations'] === false
+                || $method['expires_minutes'] === false
+                || ($method['chain_id'] !== null && filter_var($method['chain_id'], FILTER_VALIDATE_INT) === false)
+                || !adminIsHttpsUrl($method['rpc_url'])
+            ) {
+                throw new DomainException('Check the network, RPC URL, and numeric settings.');
+            }
+            $method['is_testnet'] = (int)$method['is_testnet'];
+            $method['enabled'] = (int)$method['enabled'];
+            $method['chain_id'] = $method['chain_id'] === null ? null : (int)$method['chain_id'];
+            configuredCryptoValidateMethod($method);
+            if ($method['enabled'] === 1) {
+                configuredCryptoVerifyNetwork($method);
+            }
+
+            $db->beginTransaction();
+            $saveMethod = $db->prepare(
+                "INSERT INTO crypto_payment_methods
+                    (id, label, asset, asset_type, network_key, network_name, is_testnet,
+                     chain_id, genesis_hash, rpc_url, recipient_address, token_address, decimals,
+                     pricing_mode, market_coin_id, manual_price_usd, min_confirmations,
+                     expires_minutes, enabled)
+                 VALUES
+                    (:id, :label, :asset, :asset_type, :network_key, :network_name, :is_testnet,
+                     :chain_id, :genesis_hash, :rpc_url, :recipient_address, :token_address, :decimals,
+                     :pricing_mode, :market_coin_id, :manual_price_usd, :min_confirmations,
+                     :expires_minutes, :enabled)
+                 ON DUPLICATE KEY UPDATE
+                    label = VALUES(label), asset = VALUES(asset), asset_type = VALUES(asset_type),
+                    network_key = VALUES(network_key), network_name = VALUES(network_name),
+                    is_testnet = VALUES(is_testnet), chain_id = VALUES(chain_id),
+                    genesis_hash = VALUES(genesis_hash), rpc_url = VALUES(rpc_url),
+                    recipient_address = VALUES(recipient_address), token_address = VALUES(token_address),
+                    decimals = VALUES(decimals), pricing_mode = VALUES(pricing_mode),
+                    market_coin_id = VALUES(market_coin_id), manual_price_usd = VALUES(manual_price_usd),
+                    min_confirmations = VALUES(min_confirmations), expires_minutes = VALUES(expires_minutes),
+                    enabled = VALUES(enabled)"
+            );
+            $saveMethod->execute([
+                ':id' => $method['id'],
+                ':label' => $method['label'],
+                ':asset' => $method['asset'],
+                ':asset_type' => $method['asset_type'],
+                ':network_key' => $method['network_key'],
+                ':network_name' => $method['network_name'],
+                ':is_testnet' => $method['is_testnet'],
+                ':chain_id' => $method['chain_id'],
+                ':genesis_hash' => $method['genesis_hash'],
+                ':rpc_url' => $method['rpc_url'],
+                ':recipient_address' => $method['recipient_address'],
+                ':token_address' => $method['token_address'],
+                ':decimals' => $method['decimals'],
+                ':pricing_mode' => $method['pricing_mode'],
+                ':market_coin_id' => $method['market_coin_id'],
+                ':manual_price_usd' => $method['manual_price_usd'],
+                ':min_confirmations' => $method['min_confirmations'],
+                ':expires_minutes' => $method['expires_minutes'],
+                ':enabled' => $method['enabled'],
+            ]);
+            writeAdminAudit(
+                $db,
+                (int)$_SESSION['admin_id'],
+                'configured_crypto_method_saved',
+                'crypto_payment_method',
+                $method['id'],
+                [
+                    'asset' => $method['asset'],
+                    'asset_type' => $method['asset_type'],
+                    'network_key' => $method['network_key'],
+                    'is_testnet' => (bool)$method['is_testnet'],
+                    'enabled' => (bool)$method['enabled'],
+                ]
+            );
+            $db->commit();
+            $success = 'Đã lưu phương thức crypto. Cấu hình chỉ áp dụng cho đơn mới.';
+        } catch (DomainException $exception) {
+            if ($db->inTransaction()) $db->rollBack();
+            $error = $exception->getMessage();
+        } catch (Throwable $exception) {
+            if ($db->inTransaction()) $db->rollBack();
+            error_log('Configured crypto payment method save failed: ' . $exception->getMessage());
+            $error = 'Không thể lưu phương thức crypto. Hãy kiểm tra kết nối mạng, token và cấu hình.';
+        }
     } elseif (in_array($postAction, ['save_polygon_payment_settings', 'save_solana_payment_settings'], true)) {
         $method = $postAction === 'save_polygon_payment_settings' ? 'polygon' : 'solana';
         $network = trim($_POST['payment_network'] ?? '');
@@ -1164,10 +1370,46 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $solanaAdminSettings = solanaPaymentSettings($db, $solanaAdminNetwork);
 
+    $configuredCryptoMethods = $db->query(
+        'SELECT id, label, asset, asset_type, network_name, is_testnet, enabled
+         FROM crypto_payment_methods ORDER BY created_at DESC, id'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    $editConfiguredCryptoId = adminQueryString('edit_crypto_method');
+    $configuredCryptoEdit = null;
+    if ($editConfiguredCryptoId !== '') {
+        $editMethodQuery = $db->prepare('SELECT * FROM crypto_payment_methods WHERE id = :id LIMIT 1');
+        $editMethodQuery->execute([':id' => $editConfiguredCryptoId]);
+        $configuredCryptoEdit = $editMethodQuery->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+    $configuredCryptoForm = $_SERVER['REQUEST_METHOD'] === 'POST'
+        && ($_POST['action'] ?? '') === 'save_configured_crypto_method'
+        ? $_POST
+        : ($configuredCryptoEdit ?? [
+            'id' => '',
+            'label' => '',
+            'asset' => '',
+            'asset_type' => 'evm_token',
+            'network_key' => '',
+            'network_name' => '',
+            'is_testnet' => '1',
+            'chain_id' => '',
+            'genesis_hash' => '',
+            'rpc_url' => '',
+            'recipient_address' => '',
+            'token_address' => '',
+            'decimals' => '18',
+            'pricing_mode' => 'manual',
+            'market_coin_id' => '',
+            'manual_price_usd' => '',
+            'min_confirmations' => '1',
+            'expires_minutes' => '1440',
+            'enabled' => '0',
+        ]);
+
     $tabPermissions = [
         'dashboard' => 'dashboard', 'users' => 'users', 'posts' => 'reports',
         'reports' => 'reports', 'parties' => 'parties', 'wallet' => 'finance', 'ledger' => 'finance',
-        'shop' => 'shop', 'admins' => 'admins', 'audit' => 'audit',
+        'shop' => 'shop', 'admins' => 'admins', 'audit' => 'audit', 'devices' => 'devices',
     ];
     if (!isset($tabPermissions[$tab]) || !adminHasPermission($adminRole, $tabPermissions[$tab])) {
         $tab = 'dashboard';
@@ -1354,6 +1596,54 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $auditRows = $db->query("SELECT l.*, u.full_name AS admin_name
         FROM admin_audit_log l LEFT JOIN users u ON u.id = l.actor_id
         ORDER BY l.id DESC LIMIT 100")->fetchAll(PDO::FETCH_ASSOC);
+    $devicePolicy = deviceSecurityConfig($db);
+    $deviceRows = [];
+    $totalDevicePages = 1;
+    $totalDevices = 0;
+    if ($tab === 'devices') {
+        $deviceConditions = [];
+        $deviceParams = [];
+        if ($deviceSearch !== '') {
+            $deviceConditions[] = "(d.device_id LIKE :device_id OR EXISTS (
+                SELECT 1 FROM user_devices search_ud
+                INNER JOIN users search_user ON search_user.id = search_ud.user_id
+                WHERE search_ud.device_id = d.device_id
+                  AND (search_user.email LIKE :device_email OR search_user.full_name LIKE :device_name)
+            ))";
+            $deviceParams = [
+                ':device_id' => '%' . $deviceSearch . '%',
+                ':device_email' => '%' . $deviceSearch . '%',
+                ':device_name' => '%' . $deviceSearch . '%',
+            ];
+        }
+        $deviceWhere = $deviceConditions ? ' WHERE ' . implode(' AND ', $deviceConditions) : '';
+        $deviceCount = $db->prepare('SELECT COUNT(*) FROM device_installations d' . $deviceWhere);
+        $deviceCount->execute($deviceParams);
+        $totalDevices = (int)$deviceCount->fetchColumn();
+        $totalDevicePages = max(1, (int)ceil($totalDevices / $deviceLimit));
+        $devicePage = min($devicePage, $totalDevicePages);
+        $deviceOffset = ($devicePage - 1) * $deviceLimit;
+
+        $deviceStmt = $db->prepare(
+            "SELECT d.device_id, d.is_blocked, d.block_reason, d.first_seen_at, d.last_seen_at,
+                    COUNT(DISTINCT ud.user_id) AS account_count,
+                    GROUP_CONCAT(DISTINCT CONCAT(u.full_name, ' <', u.email, '>') ORDER BY u.id SEPARATOR ', ') AS accounts
+             FROM device_installations d
+             LEFT JOIN user_devices ud ON ud.device_id = d.device_id
+             LEFT JOIN users u ON u.id = ud.user_id
+             $deviceWhere
+             GROUP BY d.device_id
+             ORDER BY d.last_seen_at DESC, d.device_id
+             LIMIT :limit OFFSET :offset"
+        );
+        foreach ($deviceParams as $key => $value) {
+            $deviceStmt->bindValue($key, $value, PDO::PARAM_STR);
+        }
+        $deviceStmt->bindValue(':limit', $deviceLimit, PDO::PARAM_INT);
+        $deviceStmt->bindValue(':offset', $deviceOffset, PDO::PARAM_INT);
+        $deviceStmt->execute();
+        $deviceRows = $deviceStmt->fetchAll(PDO::FETCH_ASSOC);
+    }
 ?>
     <!-- RESPONSIVE DASHBOARD LAYOUT -->
     <div class="flex h-screen overflow-hidden bg-gray-100">
@@ -1376,6 +1666,7 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $navItems = [
                     'dashboard' => ['dashboard', 'fa-chart-line', 'Tổng Quan'],
                     'users' => ['users', 'fa-users', 'Quản Lý Người Dùng'],
+                    'devices' => ['devices', 'fa-mobile-screen-button', 'Quản Lý Thiết Bị'],
                     'parties' => ['parties', 'fa-headphones', 'Quản Lý Phòng Party'],
                     'posts' => ['reports', 'fa-newspaper', 'Kiểm Duyệt Bài Đăng'],
                     'reports' => ['reports', 'fa-flag', 'Quản Lý Tố Cáo'],
@@ -1416,6 +1707,7 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                         <?= htmlspecialchars([
                             'dashboard' => 'Tổng Quan',
                             'users' => 'Quản Lý Người Dùng',
+                            'devices' => 'Quản Lý Thiết Bị',
                             'posts' => 'Kiểm Duyệt Bài Đăng',
                             'reports' => 'Quản Lý Tố Cáo',
                             'wallet' => 'Ví & Giao Dịch Tài Chính',
@@ -2176,6 +2468,113 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                         </div>
 
+                        <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
+                            <h3 class="text-base md:text-lg font-bold text-gray-800 mb-2">
+                                Phương thức crypto tùy chỉnh
+                            </h3>
+                            <p class="text-xs text-gray-500 mb-4">
+                                Thêm EVM native/token hoặc Solana native/SPL. Khi bật, hệ thống sẽ kiểm tra RPC, chain/cluster và thông tin token. Đơn đã tạo giữ nguyên cấu hình tại thời điểm tạo.
+                            </p>
+                            <form method="POST" class="grid grid-cols-1 md:grid-cols-3 gap-3" onsubmit="return confirm('Bật phương thức sẽ nhận tiền trên mạng đã chọn. Hãy xác nhận đây là mạng, token và địa chỉ ví chính xác. Tiếp tục?')">
+                                <input type="hidden" name="tab" value="wallet">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                <input type="hidden" name="action" value="save_configured_crypto_method">
+                                <label class="text-xs">Method ID (cfg_...)
+                                    <input name="id" required maxlength="64" pattern="cfg_[a-z0-9][a-z0-9_-]{1,59}" value="<?= htmlspecialchars((string)($configuredCryptoForm['id'] ?? '')) ?>" <?= $configuredCryptoEdit ? 'readonly' : '' ?> class="mt-1 block w-full border rounded px-2 py-2" placeholder="cfg_eth_usdc">
+                                </label>
+                                <label class="text-xs">Tên hiển thị
+                                    <input name="label" required maxlength="100" value="<?= htmlspecialchars((string)($configuredCryptoForm['label'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="USDC - Ethereum">
+                                </label>
+                                <label class="text-xs">Ticker tài sản
+                                    <input name="asset" required maxlength="20" pattern="[A-Za-z0-9]{2,20}" value="<?= htmlspecialchars((string)($configuredCryptoForm['asset'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="USDC">
+                                </label>
+                                <label class="text-xs">Loại tài sản
+                                    <select name="asset_type" class="mt-1 block w-full border rounded px-2 py-2">
+                                        <?php foreach (['evm_native' => 'EVM native', 'evm_token' => 'EVM token', 'solana_native' => 'Solana native', 'solana_spl' => 'Solana SPL'] as $type => $typeLabel): ?>
+                                            <option value="<?= $type ?>" <?= ($configuredCryptoForm['asset_type'] ?? '') === $type ? 'selected' : '' ?>><?= $typeLabel ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </label>
+                                <label class="text-xs">Network key
+                                    <input name="network_key" required maxlength="48" pattern="[a-z0-9][a-z0-9_-]{1,47}" value="<?= htmlspecialchars((string)($configuredCryptoForm['network_key'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="ethereum-mainnet">
+                                </label>
+                                <label class="text-xs">Tên mạng
+                                    <input name="network_name" required maxlength="80" value="<?= htmlspecialchars((string)($configuredCryptoForm['network_name'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="Ethereum Mainnet">
+                                </label>
+                                <label class="text-xs">Mạng
+                                    <select name="is_testnet" class="mt-1 block w-full border rounded px-2 py-2">
+                                        <option value="1" <?= (string)($configuredCryptoForm['is_testnet'] ?? '') === '1' ? 'selected' : '' ?>>Testnet</option>
+                                        <option value="0" <?= (string)($configuredCryptoForm['is_testnet'] ?? '') === '0' ? 'selected' : '' ?>>Mainnet</option>
+                                    </select>
+                                </label>
+                                <label class="text-xs">EVM chain ID (để trống với Solana)
+                                    <input type="number" min="1" name="chain_id" value="<?= htmlspecialchars((string)($configuredCryptoForm['chain_id'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs">Solana genesis hash (để trống với EVM)
+                                    <input name="genesis_hash" maxlength="64" value="<?= htmlspecialchars((string)($configuredCryptoForm['genesis_hash'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs md:col-span-2">RPC URL HTTPS (không dùng URL chứa API key/bí mật)
+                                    <input type="url" name="rpc_url" required maxlength="2048" value="<?= htmlspecialchars((string)($configuredCryptoForm['rpc_url'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="https://...">
+                                </label>
+                                <label class="text-xs">Decimals
+                                    <input type="number" min="0" max="18" name="decimals" required value="<?= htmlspecialchars((string)($configuredCryptoForm['decimals'] ?? '18')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs md:col-span-2">Địa chỉ ví nhận
+                                    <input name="recipient_address" required maxlength="128" value="<?= htmlspecialchars((string)($configuredCryptoForm['recipient_address'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs md:col-span-2">Token contract / SPL mint (để trống với native)
+                                    <input name="token_address" maxlength="128" value="<?= htmlspecialchars((string)($configuredCryptoForm['token_address'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs">Định giá
+                                    <select name="pricing_mode" class="mt-1 block w-full border rounded px-2 py-2">
+                                        <option value="manual" <?= ($configuredCryptoForm['pricing_mode'] ?? '') === 'manual' ? 'selected' : '' ?>>Giá USD do admin đặt</option>
+                                        <option value="market" <?= ($configuredCryptoForm['pricing_mode'] ?? '') === 'market' ? 'selected' : '' ?>>CoinGecko coin ID</option>
+                                    </select>
+                                </label>
+                                <label class="text-xs">CoinGecko ID
+                                    <input name="market_coin_id" maxlength="80" value="<?= htmlspecialchars((string)($configuredCryptoForm['market_coin_id'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2" placeholder="ethereum">
+                                </label>
+                                <label class="text-xs">Giá USD / 1 coin (manual)
+                                    <input type="number" min="0.000001" max="10000" step="0.000001" name="manual_price_usd" value="<?= htmlspecialchars((string)($configuredCryptoForm['manual_price_usd'] ?? '')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs">EVM confirmations (Solana cố định 1)
+                                    <input type="number" min="1" max="100000" name="min_confirmations" required value="<?= htmlspecialchars((string)($configuredCryptoForm['min_confirmations'] ?? '1')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs">Thời hạn đơn (phút)
+                                    <input type="number" min="5" max="10080" name="expires_minutes" required value="<?= htmlspecialchars((string)($configuredCryptoForm['expires_minutes'] ?? '1440')) ?>" class="mt-1 block w-full border rounded px-2 py-2">
+                                </label>
+                                <label class="text-xs">Trạng thái
+                                    <select name="enabled" class="mt-1 block w-full border rounded px-2 py-2">
+                                        <option value="0" <?= (string)($configuredCryptoForm['enabled'] ?? '') === '0' ? 'selected' : '' ?>>Tắt</option>
+                                        <option value="1" <?= (string)($configuredCryptoForm['enabled'] ?? '') === '1' ? 'selected' : '' ?>>Bật sau khi kiểm tra kết nối</option>
+                                    </select>
+                                </label>
+                                <div class="md:col-span-3 flex gap-2">
+                                    <button type="submit" class="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-semibold">Lưu / kiểm tra phương thức</button>
+                                    <a href="admin.php?tab=wallet" class="px-5 py-2.5 bg-gray-100 rounded-lg text-sm">Thêm mới</a>
+                                </div>
+                            </form>
+
+                            <div class="overflow-x-auto mt-6">
+                                <table class="w-full text-left min-w-[700px] text-sm">
+                                    <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                                        <tr><th class="p-3">Phương thức</th><th class="p-3">Mạng</th><th class="p-3">Loại</th><th class="p-3">Trạng thái</th><th class="p-3">Cấu hình</th></tr>
+                                    </thead>
+                                    <tbody class="divide-y">
+                                        <?php foreach ($configuredCryptoMethods as $configuredMethod): ?>
+                                            <tr>
+                                                <td class="p-3 font-semibold"><?= htmlspecialchars($configuredMethod['label']) ?><div class="text-xs text-gray-500"><?= htmlspecialchars($configuredMethod['asset']) ?> · <?= htmlspecialchars($configuredMethod['id']) ?></div></td>
+                                                <td class="p-3"><?= htmlspecialchars($configuredMethod['network_name']) ?><?= (int)$configuredMethod['is_testnet'] === 1 ? ' (testnet)' : ' (mainnet)' ?></td>
+                                                <td class="p-3"><?= htmlspecialchars($configuredMethod['asset_type']) ?></td>
+                                                <td class="p-3"><?= (int)$configuredMethod['enabled'] === 1 ? 'Đang bật' : 'Đã tắt' ?></td>
+                                                <td class="p-3"><a class="text-blue-700 underline" href="<?= htmlspecialchars('admin.php?tab=wallet&edit_crypto_method=' . rawurlencode($configuredMethod['id'])) ?>">Sửa</a></td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                        <?php if (!$configuredCryptoMethods): ?><tr><td class="p-4 text-gray-500" colspan="5">Chưa có phương thức tùy chỉnh.</td></tr><?php endif; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
                         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
                             <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-4 md:p-6">
                                 <h3 class="text-base md:text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
@@ -2416,6 +2815,137 @@ if ($isAdminLoggedIn && $_SERVER['REQUEST_METHOD'] === 'POST') {
                             </tbody>
                         </table>
                     </div>
+                <?php elseif ($tab === 'devices'): ?>
+                    <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-5 mb-6">
+                        <div class="mb-4">
+                            <h2 class="font-bold text-lg text-gray-800">Giới hạn tài khoản theo thiết bị</h2>
+                            <p class="text-sm text-gray-500 mt-1">
+                                Mặc định đang tắt. ID được tạo riêng trong app; cài lại app hoặc xóa dữ liệu có thể tạo ID mới.
+                            </p>
+                        </div>
+                        <form method="POST" class="flex flex-wrap items-end gap-4">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                            <input type="hidden" name="tab" value="devices">
+                            <input type="hidden" name="action" value="save_device_policy">
+                            <label class="text-sm">
+                                <span class="block mb-1 font-medium">Áp dụng giới hạn</span>
+                                <select name="enforcement_enabled" class="border rounded-lg px-3 py-2">
+                                    <option value="0" <?= !$devicePolicy['enforcement_enabled'] ? 'selected' : '' ?>>Tắt, chỉ ghi nhận</option>
+                                    <option value="1" <?= $devicePolicy['enforcement_enabled'] ? 'selected' : '' ?>>Bật giới hạn đăng ký</option>
+                                </select>
+                            </label>
+                            <label class="text-sm">
+                                <span class="block mb-1 font-medium">Tài khoản tối đa trên một thiết bị</span>
+                                <input type="number" name="max_accounts" min="1" max="20" required
+                                       value="<?= (int)$devicePolicy['max_accounts'] ?>"
+                                       class="border rounded-lg px-3 py-2 w-32">
+                            </label>
+                            <button class="px-4 py-2 bg-gray-900 text-white rounded-lg">Lưu chính sách</button>
+                        </form>
+                        <p class="text-xs text-amber-700 mt-3">
+                            Khi bật, tài khoản mới tạo bằng email hoặc đăng nhập xã hội sẽ bị từ chối nếu vượt ngưỡng.
+                            Các tài khoản hiện có vẫn đăng nhập được bằng phiên bản app đã gửi ID thiết bị.
+                        </p>
+                    </section>
+
+                    <section class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                        <div class="p-5 border-b flex flex-wrap items-end justify-between gap-4">
+                            <div>
+                                <h2 class="font-bold text-lg text-gray-800">Thiết bị đã ghi nhận</h2>
+                                <p class="text-sm text-gray-500">
+                                    <?= $totalDevices === 0 ? 'Chưa có thiết bị.' : 'Tổng ' . number_format($totalDevices) . ' thiết bị · Trang ' . $devicePage . ' / ' . $totalDevicePages ?>
+                                </p>
+                            </div>
+                            <form method="GET" class="flex flex-wrap gap-2">
+                                <input type="hidden" name="tab" value="devices">
+                                <input type="text" name="device_search" value="<?= htmlspecialchars($deviceSearch) ?>"
+                                       placeholder="Tìm ID, tên hoặc email" class="border rounded-lg px-3 py-2 text-sm">
+                                <button class="px-4 py-2 bg-gray-800 text-white rounded-lg text-sm">Tìm</button>
+                                <?php if ($deviceSearch !== ''): ?>
+                                    <a href="admin.php?tab=devices" class="px-3 py-2 bg-gray-200 text-gray-700 rounded-lg text-sm">Xóa lọc</a>
+                                <?php endif; ?>
+                            </form>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left min-w-[900px]">
+                                <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                                    <tr>
+                                        <th class="p-3">ID cài đặt</th>
+                                        <th class="p-3">Tài khoản</th>
+                                        <th class="p-3">Hoạt động gần nhất</th>
+                                        <th class="p-3">Trạng thái</th>
+                                        <th class="p-3">Thao tác</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y text-sm">
+                                <?php foreach ($deviceRows as $device): ?>
+                                    <tr>
+                                        <td class="p-3 font-mono text-xs"><?= htmlspecialchars($device['device_id']) ?></td>
+                                        <td class="p-3">
+                                            <span class="font-semibold"><?= (int)$device['account_count'] ?> tài khoản</span>
+                                            <div class="text-xs text-gray-500 max-w-md break-words">
+                                                <?= htmlspecialchars($device['accounts'] ?: 'Chưa liên kết tài khoản') ?>
+                                            </div>
+                                        </td>
+                                        <td class="p-3 text-xs text-gray-600">
+                                            <?= htmlspecialchars($device['last_seen_at']) ?>
+                                            <div class="text-gray-400">Đầu tiên: <?= htmlspecialchars($device['first_seen_at']) ?></div>
+                                        </td>
+                                        <td class="p-3">
+                                            <?php if ((int)$device['is_blocked'] === 1): ?>
+                                                <span class="px-2 py-1 bg-red-100 text-red-700 rounded-full text-xs font-semibold">Đã khóa</span>
+                                                <div class="text-xs text-gray-500 mt-1"><?= htmlspecialchars($device['block_reason'] ?? '') ?></div>
+                                            <?php else: ?>
+                                                <span class="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-semibold">Hoạt động</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td class="p-3">
+                                            <form method="POST" class="flex flex-wrap items-center gap-2"
+                                                  onsubmit="return confirm('Xác nhận <?= (int)$device['is_blocked'] === 1 ? 'mở khóa' : 'khóa' ?> thiết bị này?');">
+                                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
+                                                <input type="hidden" name="tab" value="devices">
+                                                <input type="hidden" name="action" value="set_device_status">
+                                                <input type="hidden" name="device_id" value="<?= htmlspecialchars($device['device_id']) ?>">
+                                                <input type="hidden" name="is_blocked" value="<?= (int)$device['is_blocked'] === 1 ? 0 : 1 ?>">
+                                                <?php if ((int)$device['is_blocked'] !== 1): ?>
+                                                    <input type="text" name="reason" required maxlength="500" placeholder="Lý do khóa"
+                                                           class="border rounded px-2 py-1 text-xs w-36">
+                                                <?php endif; ?>
+                                                <button class="px-3 py-1.5 rounded text-xs font-semibold text-white <?= (int)$device['is_blocked'] === 1 ? 'bg-green-600' : 'bg-red-600' ?>">
+                                                    <?= (int)$device['is_blocked'] === 1 ? 'Mở khóa' : 'Khóa thiết bị' ?>
+                                                </button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                <?php if (!$deviceRows): ?>
+                                    <tr><td colspan="5" class="p-6 text-center text-gray-500">Không tìm thấy thiết bị phù hợp.</td></tr>
+                                <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                        <?php if ($totalDevicePages > 1): ?>
+                            <div class="p-4 border-t flex justify-between items-center">
+                                <span class="text-sm text-gray-500">Trang <?= $devicePage ?> / <?= $totalDevicePages ?></span>
+                                <div class="flex gap-2">
+                                    <?php if ($devicePage > 1): ?>
+                                        <a href="admin.php?<?= htmlspecialchars(http_build_query([
+                                            'tab' => 'devices',
+                                            'device_search' => $deviceSearch,
+                                            'device_page' => $devicePage - 1,
+                                        ])) ?>" class="px-3 py-1.5 bg-gray-200 rounded text-sm">Trước</a>
+                                    <?php endif; ?>
+                                    <?php if ($devicePage < $totalDevicePages): ?>
+                                        <a href="admin.php?<?= htmlspecialchars(http_build_query([
+                                            'tab' => 'devices',
+                                            'device_search' => $deviceSearch,
+                                            'device_page' => $devicePage + 1,
+                                        ])) ?>" class="px-3 py-1.5 bg-gray-200 rounded text-sm">Sau</a>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+                    </section>
                 <?php elseif ($tab === 'admins'): ?>
                     <div class="bg-white rounded-xl shadow-sm border overflow-x-auto">
                         <div class="p-5 border-b"><h2 class="font-bold text-lg">Quản trị viên và vai trò</h2><p class="text-sm text-gray-500">Mỗi vai trò chỉ được phép truy cập các khu vực cần thiết.</p></div>

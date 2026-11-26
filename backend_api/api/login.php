@@ -24,6 +24,7 @@ foreach (['active_profile_frame_id', 'active_party_frame_id'] as $column) {
 
 // Get posted data
 $data = json_decode(file_get_contents("php://input"));
+$deviceId = normalizeDeviceId($data->device_id ?? null);
 
 // Validate input
 if (empty($data->email) || empty($data->password)) {
@@ -75,7 +76,7 @@ try {
             // Remove password from response
             unset($user['password']);
             
-            $token = issueApiToken($db, (int)$user['id']);
+            $token = issueApiToken($db, (int)$user['id'], $deviceId);
 
             // Update last login (optional)
             $update_query = "UPDATE users SET updated_at = NOW() WHERE id = :id";
@@ -107,6 +108,12 @@ try {
         ]);
     }
 
+} catch (DomainException $e) {
+    http_response_code(403);
+    echo json_encode([
+        "success" => false,
+        "message" => $e->getMessage()
+    ]);
 } catch (PDOException $e) {
     http_response_code(500);
     echo json_encode([

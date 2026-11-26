@@ -194,7 +194,7 @@ function recordVpcLedger(
 function adminRolePermissions(string $role): array
 {
     return match ($role) {
-        'super_admin' => ['dashboard', 'users', 'reports', 'finance', 'shop', 'admins', 'audit', 'parties', 'party_monitoring'],
+        'super_admin' => ['dashboard', 'users', 'reports', 'finance', 'shop', 'admins', 'audit', 'parties', 'party_monitoring', 'devices'],
         'moderator' => ['dashboard', 'users', 'reports', 'parties'],
         'finance' => ['dashboard', 'finance'],
         'support' => ['dashboard', 'users'],

@@ -58,14 +58,35 @@ has been removed. VPC adjustments, shop purchases, gifts, and sandbox top-ups
 are recorded in the additive VPC ledger. Older coin activity is intentionally
 not backfilled because trustworthy before/after balances are unavailable.
 
-The Wallet & Transactions admin tab manages Polygon USDC and Solana SOL
-payment profiles. It stores a separate enabled flag, HTTPS RPC URL, and
-receiving address for each supported testnet/mainnet profile in the existing
-`settings` table. Saving a profile selects that network for new checkouts;
-existing pending orders continue to verify against their recorded network and
-recipient. Database values take precedence over the legacy payment environment
-variables. RPC URLs are visible to finance admins, so do not put provider
-secrets in them or share screenshots containing credentials.
+The super-admin-only **Quản Lý Thiết Bị** tab records an app-installation UUID
+for email registration, OTP verification, social sign-in, and API sessions.
+It lists linked accounts and recent activity, can block/unblock an installation,
+and revokes its active API tokens when blocked. Account-creation enforcement
+starts disabled; when enabled, the configured account limit applies to new
+email and social accounts, while existing accounts can still sign in from an
+updated app. Older app versions without a device ID cannot sign in while
+enforcement is enabled. The ID is stored in app preferences, not derived from
+IMEI or another hardware identifier; reinstalling/clearing app data or a
+modified client can change or spoof it, so this is an anti-abuse signal rather
+than proof of physical-device identity. Device tables and the `api_tokens`
+device column are created additively on first use; the database account needs
+`CREATE` and `ALTER` privileges.
+
+The Wallet & Transactions admin tab retains the legacy Polygon USDC and
+Solana SOL profiles and also supports custom crypto methods. Finance admins
+can configure EVM native coins/tokens and Solana native/SPL assets for custom
+testnet or mainnet networks, including RPC, chain ID or genesis hash, receiving
+address, decimals, confirmation threshold, expiry, and USD pricing. Enabling a
+custom method checks its RPC network and token contract/mint first. The app
+uses the saved method ID to create and verify orders; each order snapshots its
+network and asset settings so later admin edits do not change open checkouts.
+Custom methods and orders are stored in `crypto_payment_methods` and
+`configured_crypto_checkout_orders`; transaction references are reserved in
+`crypto_payment_references` across legacy and configured checkouts to prevent
+double-crediting. Legacy payment settings and endpoints remain available for
+existing orders. RPC URLs are visible to finance admins,
+so do not put provider secrets in them or share screenshots containing
+credentials. Configured RPC hosts must resolve to public IP addresses.
 
 PayPal checkout is disabled in the API and its admin configuration has been
 removed. Existing PayPal order verification remains available for checkouts
@@ -147,7 +168,7 @@ amount may be unrecoverable. Review applicable legal, tax, and app store
 requirements before accepting payments.
 
 The Coin Store can display fresh CoinGecko market references for the currently
-enabled payment assets (SOL and USDC). The displayed quote includes its provider
+enabled legacy payment assets (SOL and USDC). The displayed quote includes its provider
 timestamp and can be manually refreshed; a quote-feed outage does not disable
 checkout. Testnet assets have no real market value. Solana order amounts use a
 separate quote captured and locked when the order is created. Solana USDT is
@@ -160,24 +181,26 @@ recipient. After a signature is submitted, the app automatically rechecks
 pending confirmations and temporary RPC failures for a limited time; users
 must not resend the payment. Expired orders remain available for verification
 only; the payment must have been sent before the order's original expiry. The
-five-open-order per-user limit remains in place for each payment network as a
-safety measure.
+five-open-order per-user limit remains in place as a safety measure (legacy
+flows count per network; configured methods share a five-order limit).
 The list is paginated as the user scrolls. Users can remove pending or expired
 checkouts from the list; the API marks them cancelled and retains their records.
 Cancelled order amounts remain reserved until their original expiry so they
 cannot be reassigned to another checkout. Warn users not to remove an order
 after sending funds, because its checkout details are needed to verify and
-credit that payment. History and recovery apply to both Polygon PoS Mainnet and
-Amoy, and Solana Mainnet-beta and Devnet.
+credit that payment. History and recovery apply to legacy Polygon PoS Mainnet
+and Amoy, Solana Mainnet-beta and Devnet, and configured crypto methods.
 
 ## Solana coin top-ups
 
-New Solana top-ups currently support native SOL only. Configure the selected
-Solana network, HTTPS RPC URL, and public receiving address in the admin Wallet
-& Transactions tab. Legacy `SOLANA_*` environment variables are used until an
-admin profile is saved. The server never needs the wallet's private key.
-Checkout stays disabled unless the profile is enabled and its settings are
-valid.
+The legacy Solana checkout endpoint supports native SOL. Custom methods in the
+admin Wallet & Transactions tab can additionally configure native SOL or SPL
+tokens with their mint and decimals. Configure the selected Solana cluster,
+HTTPS RPC URL, and public receiving address; SPL requires an existing receiving
+token account. Legacy `SOLANA_*` environment variables are used by the legacy
+profile until an admin profile is saved. The server never needs the wallet's
+private key. Checkout stays disabled unless a profile/method is enabled and its
+settings are valid.
 
 ```text
 SOLANA_ENABLED=0
@@ -207,9 +230,11 @@ Point a staging app build at the staging API (never the production API) with
 `--dart-define=API_BASE_URL=https://staging.example.com/api`. Without this
 override, the app continues to use the production API URL.
 
-Solana Devnet currently enables native SOL top-ups only. Obtain test SOL from
-the [Solana faucet](https://faucet.solana.com/). Devnet credits are recorded as
-`sandbox_mock`. Never enable devnet on a production database.
+Solana Devnet legacy checkout enables native SOL top-ups. Custom Devnet SPL
+methods must use test mints and a test receiving token account. Obtain test SOL
+from the [Solana faucet](https://faucet.solana.com/). Testnet credits are
+recorded as `sandbox_mock`. Never enable a testnet method on a production
+database.
 
 Party music playback is not implemented yet. The shop exposes profile frames
 and avatars only; legacy Party-frame records are hidden and cannot be purchased

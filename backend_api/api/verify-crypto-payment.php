@@ -3,6 +3,7 @@ require_once '../config/cors.php';
 require_once '../config/database.php';
 require_once __DIR__ . '/libs/ApiAuth.php';
 require_once __DIR__ . '/libs/PolygonUsdcPayments.php';
+require_once __DIR__ . '/libs/ConfiguredCryptoPayments.php';
 
 $database = new Database();
 $db = $database->getConnection();
@@ -22,6 +23,7 @@ if (
 
 try {
     ensurePolygonUsdcPaymentSchema($db);
+    ensureConfiguredCryptoReferenceSchema($db);
     $query = $db->prepare(
         'SELECT *, UNIX_TIMESTAMP(created_at) AS created_epoch,
                 UNIX_TIMESTAMP(expires_at) AS expires_epoch
@@ -165,6 +167,12 @@ try {
     if ($usedHashQuery->fetchColumn() !== false) {
         throw new DomainException('This transaction has already been used for a coin top-up.');
     }
+    configuredCryptoReservePaymentReference(
+        $db,
+        'evm:' . (int)$lockedCheckout['chain_id'],
+        strtolower($transactionHash),
+        $checkoutId
+    );
 
     $balanceQuery = $db->prepare('SELECT coins FROM users WHERE id = :id AND is_active = 1 FOR UPDATE');
     $balanceQuery->execute([':id' => $userId]);
